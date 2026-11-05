@@ -177,26 +177,30 @@ describe('User Model', () => {
     });
 
     describe('ensureAdmin', () => {
-        test('creates default admin@localhost when missing', async () => {
-            await User.ensureAdmin('adminpass123');
-            const admin = User.findByEmail('admin@localhost');
+        test('creates default admin@gmail.com with admin123 when called with no arguments', async () => {
+            await User.ensureAdmin();
+            const admin = User.findByEmail('admin@gmail.com');
             expect(admin).not.toBeNull();
             expect(admin.role).toBe('admin');
             // findByEmail returns the raw row (snake_case columns)
             expect(admin.is_active).toBe(1);
+            expect(await User.authenticate('admin@gmail.com', 'admin123')).not.toBeNull();
         });
 
-        test('is a no-op when admin already exists', async () => {
+        test('is a no-op when admin@gmail.com already exists', async () => {
             await User.ensureAdmin('different-pass-123');
-            const admin = User.findByEmail('admin@localhost');
+            const admin = User.findByEmail('admin@gmail.com');
             expect(admin).not.toBeNull();
             // original password still works (user was not recreated)
-            expect(await User.authenticate('admin@localhost', 'adminpass123')).not.toBeNull();
+            expect(await User.authenticate('admin@gmail.com', 'admin123')).not.toBeNull();
         });
 
-        test('is a no-op without a password argument', async () => {
-            await User.ensureAdmin();
-            expect(User.findByEmail('admin@localhost')).not.toBeNull();
+        test('supports custom admin email and password when provided', async () => {
+            await User.ensureAdmin('custompass123', 'customadmin@example.com');
+            const customAdmin = User.findByEmail('customadmin@example.com');
+            expect(customAdmin).not.toBeNull();
+            expect(customAdmin.role).toBe('admin');
+            expect(await User.authenticate('customadmin@example.com', 'custompass123')).not.toBeNull();
         });
     });
 });

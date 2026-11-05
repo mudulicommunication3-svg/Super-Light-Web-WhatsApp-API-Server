@@ -170,7 +170,9 @@ class Session {
 
         console.log(`[Session] Found ${directories.length} session folder(s) on disk: ${directories.join(', ')}`);
 
-        const adminUser = db.prepare('SELECT email FROM users WHERE email = ?').get('admin@localhost');
+        const adminUser = db.prepare(
+            "SELECT email FROM users WHERE email IN ('admin@gmail.com', 'admin@localhost') OR role = 'admin' ORDER BY created_at ASC LIMIT 1"
+        ).get();
         const defaultOwner = adminUser ? adminUser.email : null;
 
         const insertStmt = db.prepare(`

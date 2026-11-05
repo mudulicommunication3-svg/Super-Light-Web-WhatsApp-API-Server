@@ -42,7 +42,7 @@ const rateLimit = require('express-rate-limit');
 // Import new modules
 const { db } = require('./src/config/database');
 const { User, Session, ActivityLog } = require('./src/models');
-const { isValidKey } = require('./src/utils/crypto');
+const { isValidKey, generateKey } = require('./src/utils/crypto');
 const response = require('./src/utils/response');
 const whatsappService = require('./src/services/whatsapp');
 const { dispatchWebhook, getWebhookUrl } = require('./src/services/webhook');
@@ -53,13 +53,31 @@ const { errorHandler, notFoundHandler } = require('./src/middleware/errorHandler
 // API v1 (includes legacy endpoints)
 const { initializeApi } = require('./src/routes/api');
 
-// Validate encryption key
-const ENCRYPTION_KEY = process.env.TOKEN_ENCRYPTION_KEY;
-if (!ENCRYPTION_KEY || !isValidKey(ENCRYPTION_KEY)) {
-    console.error('FATAL: TOKEN_ENCRYPTION_KEY must be at least 64 hexadecimal characters!');
-    console.error('Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
-    process.exit(1);
+// Validate encryption key (auto-generate & persist a fallback key on fresh boot if not set in env)
+if (!process.env.TOKEN_ENCRYPTION_KEY || !isValidKey(process.env.TOKEN_ENCRYPTION_KEY)) {
+    const keyFilePath = path.join(__dirname, 'data', '.encryption_key');
+    const dataDir = path.dirname(keyFilePath);
+    if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+    }
+    if (fs.existsSync(keyFilePath)) {
+        try {
+            process.env.TOKEN_ENCRYPTION_KEY = fs.readFileSync(keyFilePath, 'utf-8').trim();
+        } catch (err) {
+            // Ignore read error and regenerate below
+        }
+    }
+    if (!process.env.TOKEN_ENCRYPTION_KEY || !isValidKey(process.env.TOKEN_ENCRYPTION_KEY)) {
+        process.env.TOKEN_ENCRYPTION_KEY = generateKey();
+        try {
+            fs.writeFileSync(keyFilePath, process.env.TOKEN_ENCRYPTION_KEY, { mode: 0o600 });
+            console.warn('[SECURITY] TOKEN_ENCRYPTION_KEY not set in env; generated persistent key in data/.encryption_key');
+        } catch (err) {
+            console.warn('[SECURITY] TOKEN_ENCRYPTION_KEY not set in env; generated temporary runtime key');
+        }
+    }
 }
+const ENCRYPTION_KEY = process.env.TOKEN_ENCRYPTION_KEY;
 
 // Initialize Express
 const app = express();
@@ -666,10 +684,14 @@ const schedulerInterval = setInterval(async () => {
 }, 60 * 1000);
 if (typeof schedulerInterval.unref === 'function') schedulerInterval.unref();
 
-// Initialize existing sessions on startup
+// Initialize existing sessions and default admin user on startup
 (async () => {
-    // Ensure default admin exists
-    await User.ensureAdmin(process.env.ADMIN_DASHBOARD_PASSWORD);
+    // Check if an admin user exists on server start; if not, auto-create default admin (admin@gmail.com / admin123)
+    const defaultAdminEmail = process.env.ADMIN_EMAIL || 'admin@gmail.com';
+    const defaultAdminPassword = process.env.ADMIN_DASHBOARD_PASSWORD || 'admin123';
+    if (!User.hasAdmin() || !User.findByEmail(defaultAdminEmail)) {
+        await User.ensureAdmin(defaultAdminPassword, defaultAdminEmail);
+    }
 
     // Sync sessions from disk to DB
     Session.syncWithFilesystem();

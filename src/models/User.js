@@ -183,28 +183,44 @@ class User {
     }
 
     /**
-     * Create default admin user if none exists
-     * @param {string} adminPassword - Admin password from environment
+     * Check if any admin user exists in the database
+     * @returns {boolean} True if at least one active admin user exists
      */
-    static async ensureAdmin(adminPassword) {
-        if (!adminPassword) return;
+    static hasAdmin() {
+        const row = db.prepare("SELECT 1 FROM users WHERE role = 'admin' AND is_active = 1 LIMIT 1").get();
+        return Boolean(row);
+    }
 
-        const adminExists = this.findByEmail('admin@localhost');
+    /**
+     * Create default admin user if none exists
+     * @param {string} [adminPassword='admin123'] - Admin password (defaults to 'admin123')
+     * @param {string} [adminEmail='admin@gmail.com'] - Admin email (defaults to 'admin@gmail.com')
+     * @returns {Promise<object|null>} Created or existing admin user (sanitized)
+     */
+    static async ensureAdmin(adminPassword = 'admin123', adminEmail = 'admin@gmail.com') {
+        const passwordToUse = adminPassword || 'admin123';
+        const emailToUse = (adminEmail || 'admin@gmail.com').toLowerCase();
+
+        const adminExists = this.findByEmail(emailToUse);
         if (!adminExists) {
             try {
-                const hashedPassword = await bcrypt.hash(adminPassword, 12);
+                const hashedPassword = await bcrypt.hash(passwordToUse, 12);
                 const id = crypto.randomUUID();
                 const stmt = db.prepare(`
                     INSERT INTO users (id, email, password, role, created_by, created_at, is_active)
-                    VALUES (?, 'admin@localhost', ?, 'admin', 'system', datetime('now'), 1)
+                    VALUES (?, ?, ?, 'admin', 'system', datetime('now'), 1)
                 `);
-                stmt.run(id, hashedPassword);
-                console.log('[User] Default admin user created');
+                stmt.run(id, emailToUse, hashedPassword);
+                console.log(`[User] Default admin user created (${emailToUse})`);
+                return this.findById(id);
             } catch (err) {
                 // The legacy env-password login still works; warn instead of crashing boot
                 console.warn(`[User] Could not create default admin user: ${err.message}`);
+                return null;
             }
         }
+
+        return this._sanitize(adminExists);
     }
 }
 
