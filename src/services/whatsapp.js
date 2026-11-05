@@ -23,6 +23,7 @@ const {
     makeCacheableSignalKeyStore,
     isJidBroadcast,
     downloadMediaMessage,
+    prepareWAMessageMedia,
     getUrlInfo,
     Browsers,
     DisconnectReason
@@ -585,8 +586,10 @@ async function getJoinedGroups(sessionId) {
 
 /**
  * Build a Baileys text message payload with high-quality link preview when the
- * text contains an http/https URL. Wrapped in try-catch so preview failures
- * gracefully fall back to normal text sending without failing the request.
+ * text contains an http/https URL. Sends the official WhatsApp crawler User-Agent
+ * so dynamic e-commerce/SSR URLs (e.g. ?item=...) return product-specific OpenGraph
+ * title, description, and image instead of generic homepage metadata.
+ * Wrapped in try-catch so preview failures gracefully fall back to plain text.
  *
  * @param {string} text - Message text
  * @param {object} [sock] - Optional Baileys socket (used for high-res thumbnail upload)
@@ -598,21 +601,57 @@ async function buildTextMessageWithPreview(text, sock = null) {
         return messageData;
     }
 
-    const urlMatch = text.match(/https?:\/\/[^\s<>"]+/i);
+    const urlMatch = text.match(/https?:\/\/[^\s<>"']+/i);
     if (!urlMatch) {
         return messageData;
     }
 
-    const matchedUrl = urlMatch[0];
+    const matchedUrl = urlMatch[0].replace(/[.,;!?)\]]+$/, '');
+    const fetchOpts = {
+        timeout: 8000,
+        headers: {
+            'user-agent': 'WhatsApp/2.24.16.78 A',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'accept-language': 'en-US,en;q=0.9'
+        }
+    };
+
     try {
         if (typeof getUrlInfo === 'function') {
+            // 1. Fetch OpenGraph metadata and generate a crisp 512px jpegThumbnail
             const urlInfo = await getUrlInfo(matchedUrl, {
-                thumbnailWidth: 1024,
-                fetchOpts: { timeout: 5000 },
-                logger,
-                uploadImage: sock?.waUploadToServer
+                thumbnailWidth: 512,
+                fetchOpts,
+                logger
             });
+
             if (urlInfo) {
+                // Ensure matched-text matches the exact URL substring in the message
+                urlInfo['matched-text'] = matchedUrl;
+
+                // 2. Also upload highQualityThumbnail to WhatsApp servers when socket is available,
+                // while preserving the 512px jpegThumbnail for inline preview cards.
+                if (sock?.waUploadToServer && urlInfo.originalThumbnailUrl && typeof prepareWAMessageMedia === 'function') {
+                    try {
+                        const { imageMessage } = await prepareWAMessageMedia(
+                            { image: { url: urlInfo.originalThumbnailUrl } },
+                            {
+                                upload: sock.waUploadToServer,
+                                mediaTypeOverride: 'thumbnail-link',
+                                options: fetchOpts
+                            }
+                        );
+                        if (imageMessage) {
+                            urlInfo.highQualityThumbnail = imageMessage;
+                            if (!urlInfo.jpegThumbnail && imageMessage.jpegThumbnail) {
+                                urlInfo.jpegThumbnail = Buffer.from(imageMessage.jpegThumbnail);
+                            }
+                        }
+                    } catch (uploadErr) {
+                        console.warn(`[WhatsApp] High-res thumbnail upload failed for ${matchedUrl}, using inline jpegThumbnail: ${uploadErr.message}`);
+                    }
+                }
+
                 messageData.linkPreview = urlInfo;
             }
         }
