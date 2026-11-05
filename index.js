@@ -82,14 +82,11 @@ const ENCRYPTION_KEY = process.env.TOKEN_ENCRYPTION_KEY;
 // Initialize Express
 const app = express();
 
-// ONLY trust proxy headers (X-Forwarded-For) when explicitly sitting behind a
-// reverse proxy (TRUST_PROXY=true). Blindly trusting them lets an attacker
-// spoof req.ip to rotate identities and bypass per-IP rate limits and the login
-// brute-force lockout (a DoS / brute-force driver). When behind a proxy, ensure
-// it overwrites X-Forwarded-For (e.g. proxy_set_header X-Forwarded-For $remote_addr).
-const trustProxy = process.env.TRUST_PROXY === 'true'
-    ? (Number.parseInt(process.env.TRUST_PROXY_HOPS || '1', 10) || 1)
-    : false;
+// Trust reverse proxy headers by default (Cloud Run, Render, Nginx, AI Studio iframe proxy)
+// unless explicitly disabled with TRUST_PROXY=false.
+const trustProxy = process.env.TRUST_PROXY === 'false'
+    ? false
+    : (Number.parseInt(process.env.TRUST_PROXY_HOPS || '1', 10) || 1);
 app.set('trust proxy', trustProxy);
 
 const server = http.createServer(app);
@@ -182,7 +179,8 @@ app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 app.use(helmet({
     contentSecurityPolicy: false,
-    crossOriginEmbedderPolicy: false
+    crossOriginEmbedderPolicy: false,
+    frameguard: false
 }));
 
 app.use(rateLimit({
@@ -199,24 +197,41 @@ app.use(session({
     secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
+    proxy: true,
     cookie: {
         httpOnly: true,
-        // Secure cookies by default in production (opt-out via COOKIE_SECURE=false)
-        secure: process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE === 'true' : isProduction,
+        secure: process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE === 'true' : 'auto',
         sameSite: 'lax',
         maxAge: sessionCookieMaxAge
     }
 }));
 
+// Dynamically upgrade session cookie to SameSite=None; Secure; Partitioned when accessed
+// over HTTPS (including reverse proxies / cross-origin preview iframes) so browsers do not
+// drop the session cookie after login.
+app.use((req, res, next) => {
+    const isHttps = req.secure || req.headers['x-forwarded-proto']?.split(',')[0]?.trim() === 'https';
+    if (isHttps && req.session && req.session.cookie) {
+        req.session.cookie.secure = true;
+        req.session.cookie.sameSite = 'none';
+        req.session.cookie.partitioned = true;
+    }
+    next();
+});
+
 // Same-origin enforcement for state-changing requests (CSRF defense).
-// Browsers always send an Origin header on cross-site requests; API clients
-// (curl, scripts) typically send none and are unaffected.
+// Checks both Host and X-Forwarded-Host so reverse proxies do not falsely reject login POSTs.
 app.use((req, res, next) => {
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
     const origin = req.headers.origin;
     if (!origin) return next();
     try {
-        if (new URL(origin).host === req.headers.host) return next();
+        const originHost = new URL(origin).host;
+        const allowedHosts = [
+            req.headers.host,
+            ...(req.headers['x-forwarded-host'] ? req.headers['x-forwarded-host'].split(',').map(h => h.trim()) : [])
+        ].filter(Boolean);
+        if (allowedHosts.includes(originHost)) return next();
     } catch (err) {
         // invalid Origin -> reject below
     }
@@ -275,7 +290,11 @@ wss.on('connection', (ws, req) => {
                 ws.close(1008, 'Invalid Origin header');
                 return;
             }
-            if (originHost !== req.headers.host) {
+            const allowedHosts = [
+                req.headers.host,
+                ...(req.headers['x-forwarded-host'] ? req.headers['x-forwarded-host'].split(',').map(h => h.trim()) : [])
+            ].filter(Boolean);
+            if (!allowedHosts.includes(originHost)) {
                 ws.close(1008, 'Cross-origin WebSocket connections are not allowed');
                 return;
             }
@@ -688,10 +707,10 @@ if (typeof schedulerInterval.unref === 'function') schedulerInterval.unref();
 (async () => {
     // Check if an admin user exists on server start; if not, auto-create default admin (admin@gmail.com / admin123)
     const defaultAdminEmail = process.env.ADMIN_EMAIL || 'admin@gmail.com';
-    const defaultAdminPassword = process.env.ADMIN_DASHBOARD_PASSWORD || 'admin123';
-    if (!User.hasAdmin() || !User.findByEmail(defaultAdminEmail)) {
-        await User.ensureAdmin(defaultAdminPassword, defaultAdminEmail);
-    }
+    const rawAdminPass = process.env.ADMIN_DASHBOARD_PASSWORD;
+    const isPlaceholderPass = typeof rawAdminPass === 'string' && /^change_me|^replace_with/i.test(rawAdminPass.trim());
+    const defaultAdminPassword = (!rawAdminPass || isPlaceholderPass) ? 'admin123' : rawAdminPass;
+    await User.ensureAdmin(defaultAdminPassword, defaultAdminEmail);
 
     // Sync sessions from disk to DB
     Session.syncWithFilesystem();

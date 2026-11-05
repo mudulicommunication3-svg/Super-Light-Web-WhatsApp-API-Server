@@ -109,6 +109,14 @@ router.post('/login', asyncHandler(async (req, res) => {
             req.session.userRole = userData.role;
             req.session.userId = userData.id;
 
+            // Preserve SameSite=None; Secure; Partitioned after session.regenerate when over HTTPS/proxy
+            const isHttps = req.secure || req.headers['x-forwarded-proto']?.split(',')[0]?.trim() === 'https';
+            if (isHttps && req.session.cookie) {
+                req.session.cookie.secure = true;
+                req.session.cookie.sameSite = 'none';
+                req.session.cookie.partitioned = true;
+            }
+
             req.session.save((saveErr) => {
                 if (saveErr) {
                     console.error('Session save error:', saveErr);
@@ -121,19 +129,20 @@ router.post('/login', asyncHandler(async (req, res) => {
         });
     };
 
-    // Legacy password-only login for admin (now requires username 'admin')
+    // Legacy password-only login for admin (username 'admin' with ADMIN_DASHBOARD_PASSWORD)
     if (email === 'admin' && password) {
         if (ADMIN_PASSWORD && safeEqual(password, ADMIN_PASSWORD)) {
             return establishSession(
-                { email: 'admin@localhost', role: 'admin', id: 'legacy-admin' },
-                () => response.success(res, { role: 'admin', email: 'admin@localhost' })
+                { email: 'admin@gmail.com', role: 'admin', id: 'legacy-admin' },
+                () => response.success(res, { role: 'admin', email: 'admin@gmail.com' })
             );
         }
     }
 
-    // Email/password login
+    // Email/password login (also allow shorthand 'admin' -> 'admin@gmail.com')
     if (email && password) {
-        const user = await User.authenticate(email, password);
+        const normalizedLookup = email.trim().toLowerCase() === 'admin' ? 'admin@gmail.com' : email.trim();
+        const user = await User.authenticate(normalizedLookup, password);
         if (user) {
             return establishSession(
                 { email: user.email, role: user.role, id: user.id },

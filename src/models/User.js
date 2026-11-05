@@ -198,7 +198,8 @@ class User {
      * @returns {Promise<object|null>} Created or existing admin user (sanitized)
      */
     static async ensureAdmin(adminPassword = 'admin123', adminEmail = 'admin@gmail.com') {
-        const passwordToUse = adminPassword || 'admin123';
+        const isPlaceholder = typeof adminPassword === 'string' && /^change_me|^replace_with/i.test(adminPassword.trim());
+        const passwordToUse = (!adminPassword || isPlaceholder) ? 'admin123' : adminPassword;
         const emailToUse = (adminEmail || 'admin@gmail.com').toLowerCase();
 
         const adminExists = this.findByEmail(emailToUse);
@@ -214,10 +215,24 @@ class User {
                 console.log(`[User] Default admin user created (${emailToUse})`);
                 return this.findById(id);
             } catch (err) {
-                // The legacy env-password login still works; warn instead of crashing boot
                 console.warn(`[User] Could not create default admin user: ${err.message}`);
                 return null;
             }
+        }
+
+        // If the existing default admin was previously seeded with the template placeholder password,
+        // repair its password to passwordToUse ('admin123') and ensure role='admin', is_active=1.
+        try {
+            const matchesPlaceholder = await bcrypt.compare('CHANGE_ME_use_a_long_random_password', adminExists.password);
+            if (matchesPlaceholder) {
+                const hashedPassword = await bcrypt.hash(passwordToUse, 12);
+                db.prepare("UPDATE users SET password = ?, role = 'admin', is_active = 1 WHERE id = ?")
+                    .run(hashedPassword, adminExists.id);
+                console.log(`[User] Updated default admin (${emailToUse}) from placeholder password to default password`);
+                return this.findById(adminExists.id);
+            }
+        } catch (err) {
+            // Ignore comparison error
         }
 
         return this._sanitize(adminExists);

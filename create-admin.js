@@ -3,7 +3,7 @@
  * Standalone Admin Seed Script (create-admin.js)
  *
  * Ensures that the SQLite database schema is initialized and the default
- * admin user exists before starting the server.
+ * admin user (admin@gmail.com / admin123) exists before starting the server.
  *
  * Usage:
  *   node create-admin.js
@@ -17,8 +17,11 @@ const crypto = require('crypto');
 const { db, initializeSchema, close, DB_PATH } = require('./src/config/database');
 const bcrypt = require('./src/utils/bcrypt-compat');
 
+const rawEnvPass = process.env.ADMIN_DASHBOARD_PASSWORD;
+const isPlaceholder = typeof rawEnvPass === 'string' && /^change_me|^replace_with/i.test(rawEnvPass.trim());
+
 const DEFAULT_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@gmail.com').toLowerCase();
-const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_DASHBOARD_PASSWORD || 'admin123';
+const DEFAULT_ADMIN_PASSWORD = (!rawEnvPass || isPlaceholder) ? 'admin123' : rawEnvPass;
 const DEFAULT_ADMIN_ROLE = 'admin';
 
 async function seedAdmin() {
@@ -27,21 +30,23 @@ async function seedAdmin() {
         initializeSchema();
 
         const existingAdmin = db
-            .prepare('SELECT id, email, role, is_active FROM users WHERE email = ?')
+            .prepare('SELECT id, email, password, role, is_active FROM users WHERE email = ?')
             .get(DEFAULT_ADMIN_EMAIL);
 
+        const hashedPassword = await bcrypt.hash(DEFAULT_ADMIN_PASSWORD, 12);
+
         if (existingAdmin) {
-            // Ensure role is 'admin' and account is active
-            if (existingAdmin.role !== 'admin' || existingAdmin.is_active !== 1) {
-                db.prepare("UPDATE users SET role = 'admin', is_active = 1 WHERE id = ?").run(existingAdmin.id);
-                console.log(`[Seed] Updated existing user '${DEFAULT_ADMIN_EMAIL}' to active admin role.`);
+            const passwordMatches = await bcrypt.compare(DEFAULT_ADMIN_PASSWORD, existingAdmin.password);
+            if (!passwordMatches || existingAdmin.role !== 'admin' || existingAdmin.is_active !== 1) {
+                db.prepare("UPDATE users SET password = ?, role = 'admin', is_active = 1 WHERE id = ?")
+                    .run(hashedPassword, existingAdmin.id);
+                console.log(`[Seed] Reset credentials and active admin role for '${DEFAULT_ADMIN_EMAIL}'.`);
             } else {
-                console.log(`[Seed] Admin user '${DEFAULT_ADMIN_EMAIL}' already exists (id: ${existingAdmin.id}).`);
+                console.log(`[Seed] Admin user '${DEFAULT_ADMIN_EMAIL}' already exists and credentials match (id: ${existingAdmin.id}).`);
             }
             return;
         }
 
-        const hashedPassword = await bcrypt.hash(DEFAULT_ADMIN_PASSWORD, 12);
         const id = crypto.randomUUID();
 
         db.prepare(`
