@@ -30,6 +30,8 @@ jest.mock('@whiskeysockets/baileys', () => {
         makeCacheableSignalKeyStore: jest.fn(x => x),
         isJidBroadcast: jest.fn(() => false),
         downloadMediaMessage: jest.fn(() => Promise.resolve(Buffer.alloc(0))),
+        getUrlInfo: jest.fn(),
+        jidNormalizedUser: jest.fn(jid => jid),
         Browsers: { ubuntu: jest.fn(() => 'browser') },
         DisconnectReason: { loggedOut: 401, connectionReplaced: 440 }
     };
@@ -82,5 +84,33 @@ describe('whatsapp connect() concurrency safety', () => {
         // The mock socket must have been ended (zombie guard) and not registered.
         expect(sock.end).toHaveBeenCalled();
         expect(whatsapp.getSocket('zombie_test')).toBeNull();
+    });
+
+    test('buildTextMessageWithPreview attaches linkPreview when URL is present and getUrlInfo succeeds', async () => {
+        const { getUrlInfo } = require('@whiskeysockets/baileys');
+        const mockPreview = {
+            'canonical-url': 'https://example.com/',
+            'matched-text': 'https://example.com',
+            title: 'Example Domain',
+            description: 'Example description'
+        };
+        getUrlInfo.mockResolvedValueOnce(mockPreview);
+
+        const payload = await whatsapp.buildTextMessageWithPreview('Visit https://example.com today');
+        expect(getUrlInfo).toHaveBeenCalledWith('https://example.com', expect.any(Object));
+        expect(payload).toEqual({
+            text: 'Visit https://example.com today',
+            linkPreview: mockPreview
+        });
+    });
+
+    test('buildTextMessageWithPreview falls back to plain text when getUrlInfo throws', async () => {
+        const { getUrlInfo } = require('@whiskeysockets/baileys');
+        getUrlInfo.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+
+        const payload = await whatsapp.buildTextMessageWithPreview('Broken link https://unreachable.invalid/page');
+        expect(payload).toEqual({
+            text: 'Broken link https://unreachable.invalid/page'
+        });
     });
 });

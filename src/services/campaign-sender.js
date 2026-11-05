@@ -169,11 +169,11 @@ class CampaignSender extends EventEmitter {
             const jid = recipient.number.includes('@') ? recipient.number : `${recipient.number}@s.whatsapp.net`;
 
             switch (campaign.message.type) {
-                case 'text':
-                    messageData = {
-                        text: messageContent
-                    };
+                case 'text': {
+                    const { buildTextMessageWithPreview } = require('./whatsapp');
+                    messageData = await buildTextMessageWithPreview(messageContent, session.sock);
                     break;
+                }
 
                 case 'image':
                     messageData = {

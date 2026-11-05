@@ -23,6 +23,7 @@ const {
     makeCacheableSignalKeyStore,
     isJidBroadcast,
     downloadMediaMessage,
+    getUrlInfo,
     Browsers,
     DisconnectReason
 } = require('@whiskeysockets/baileys');
@@ -145,7 +146,7 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
         printQRInTerminal: false,
         logger,
         browser: Browsers.ubuntu('Chrome'),
-        generateHighQualityLinkPreview: false,
+        generateHighQualityLinkPreview: true,
         shouldIgnoreJid: (jid) => isJidBroadcast(jid),
         qrTimeout: 40000,
         markOnlineOnConnect: true,
@@ -433,7 +434,8 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
                         }
                     } else {
                         const replyText = typeof replyPayload === 'object' ? (replyPayload.body || replyPayload.text || String(replyPayload)) : String(replyPayload);
-                        await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
+                        const replyMessageData = await buildTextMessageWithPreview(replyText, sock);
+                        await sock.sendMessage(remoteJid, replyMessageData, { quoted: msg });
                         
                         // Save auto-reply message into ChatMessage cache as outgoing
                         const ChatMessage = require('../models/ChatMessage');
@@ -454,7 +456,8 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
                     const aiReply = await aiChatbot.generateResponse({ sessionId, remoteJid, userText: textBody });
                     if (aiReply) {
                         console.log(`[AI Chatbot] Sending AI response for session ${sessionId} to ${remoteJid}`);
-                        await sock.sendMessage(remoteJid, { text: aiReply }, { quoted: msg });
+                        const aiMessageData = await buildTextMessageWithPreview(aiReply, sock);
+                        await sock.sendMessage(remoteJid, aiMessageData, { quoted: msg });
 
                         const ChatMessage = require('../models/ChatMessage');
                         ChatMessage.save({
@@ -581,6 +584,46 @@ async function getJoinedGroups(sessionId) {
 }
 
 /**
+ * Build a Baileys text message payload with high-quality link preview when the
+ * text contains an http/https URL. Wrapped in try-catch so preview failures
+ * gracefully fall back to normal text sending without failing the request.
+ *
+ * @param {string} text - Message text
+ * @param {object} [sock] - Optional Baileys socket (used for high-res thumbnail upload)
+ * @returns {Promise<{ text: string, linkPreview?: object }>}
+ */
+async function buildTextMessageWithPreview(text, sock = null) {
+    const messageData = { text };
+    if (typeof text !== 'string' || !text) {
+        return messageData;
+    }
+
+    const urlMatch = text.match(/https?:\/\/[^\s<>"]+/i);
+    if (!urlMatch) {
+        return messageData;
+    }
+
+    const matchedUrl = urlMatch[0];
+    try {
+        if (typeof getUrlInfo === 'function') {
+            const urlInfo = await getUrlInfo(matchedUrl, {
+                thumbnailWidth: 1024,
+                fetchOpts: { timeout: 5000 },
+                logger,
+                uploadImage: sock?.waUploadToServer
+            });
+            if (urlInfo) {
+                messageData.linkPreview = urlInfo;
+            }
+        }
+    } catch (err) {
+        console.warn(`[WhatsApp] Link preview generation failed for ${matchedUrl}, falling back to plain text: ${err.message}`);
+    }
+
+    return messageData;
+}
+
+/**
  * Send a text message using an active session socket
  * @param {string} sessionId - Session ID
  * @param {string} toJid - Target JID (e.g., number@s.whatsapp.net)
@@ -591,7 +634,8 @@ async function sendTextMessage(sessionId, toJid, text) {
     const sock = activeSockets.get(sessionId);
     if (!sock) throw new Error(`Session ${sessionId} is not connected`);
     const jid = jidNormalizedUser(toJid);
-    return await sock.sendMessage(jid, { text });
+    const messageData = await buildTextMessageWithPreview(text, sock);
+    return await sock.sendMessage(jid, messageData);
 }
 
 module.exports = {
@@ -604,5 +648,6 @@ module.exports = {
     getActiveSessions,
     getJoinedGroups,
     sendTextMessage,
+    buildTextMessageWithPreview,
     AUTH_DIR
 };

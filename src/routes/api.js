@@ -1414,7 +1414,12 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
     async function sendMessage(sock, to, message) {
         try {
             const jid = jidNormalizedUser(to);
-            const result = await sock.sendMessage(jid, message);
+            let payload = message;
+            if (message && typeof message.text === 'string') {
+                const { buildTextMessageWithPreview } = require('../services/whatsapp');
+                payload = await buildTextMessageWithPreview(message.text, sock);
+            }
+            const result = await sock.sendMessage(jid, payload);
             return { status: 'success', message: `Message sent to ${to}`, messageId: result.key.id };
         } catch (error) {
             console.error(`Failed to send message to ${to}:`, error);
