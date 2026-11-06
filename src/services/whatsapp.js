@@ -697,61 +697,38 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
                             console.warn(`[WhatsApp] Sharp processing for ${matchedUrl}: ${sharpErr.message}`);
                         }
 
-                        const isChannel = Boolean(targetJid && (
-                            targetJid.endsWith('@newsletter') ||
-                            (typeof isJidNewsletter === 'function' && isJidNewsletter(targetJid))
-                        ));
+                        // Attach highQualityThumbnail with directPath and explicit dimensions for BIG IMAGE PREVIEW.
+                        // WhatsApp clients check for thumbnailDirectPath + thumbnailWidth/Height to render the large banner card.
+                        // CRITICAL: Passing jid: targetJid signals Baileys to upload raw, unencrypted public media for Channels (@newsletter).
+                        // If mediaKey/fileEncSha256 is present on a channel message, subscribers cannot decrypt it and WhatsApp renders a black blank box.
+                        if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && (hqBuffer || inlineThumb)) {
+                            const isChannel = Boolean(targetJid && (
+                                targetJid.endsWith('@newsletter') ||
+                                (typeof isJidNewsletter === 'function' && isJidNewsletter(targetJid))
+                            ));
 
-                        // 3. For WhatsApp Channels (@newsletter):
-                        // WhatsApp Channel clients cannot download encrypted MMS thumbnailDirectPath from /mms/image
-                        // (which results in the infamous black blank box).
-                        // Instead, channels use contextInfo.externalAdReply with renderLargerThumbnail: true
-                        // paired with inline thumbnail bytes + public thumbnailUrl to render the full-width BIG IMAGE card!
-                        if (isChannel) {
-                            delete urlInfo.highQualityThumbnail;
-                            messageData.contextInfo = {
-                                externalAdReply: {
-                                    title: urlInfo.title || 'Product Preview',
-                                    body: urlInfo.description || '',
-                                    mediaType: 1, // IMAGE
-                                    thumbnailUrl: imgUrl,
-                                    thumbnail: inlineThumb || hqBuffer,
-                                    sourceUrl: matchedUrl,
-                                    renderLargerThumbnail: true,
-                                    showAdAttribution: false
+                            const { imageMessage } = await prepareWAMessageMedia(
+                                { image: hqBuffer || inlineThumb },
+                                {
+                                    upload: sock.waUploadToServer,
+                                    mediaTypeOverride: 'thumbnail-link',
+                                    jid: targetJid || undefined,
+                                    logger
                                 }
-                            };
-                        } else {
-                            // For individual chats and groups: MMS highQualityThumbnail works perfectly with E2EE
-                            if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && (hqBuffer || inlineThumb)) {
-                                const { imageMessage } = await prepareWAMessageMedia(
-                                    { image: hqBuffer || inlineThumb },
-                                    {
-                                        upload: sock.waUploadToServer,
-                                        mediaTypeOverride: 'thumbnail-link',
-                                        jid: targetJid || undefined,
-                                        logger
-                                    }
-                                );
-                                if (imageMessage) {
-                                    imageMessage.width = thumbDimensions.width;
-                                    imageMessage.height = thumbDimensions.height;
-                                    urlInfo.highQualityThumbnail = imageMessage;
+                            );
+                            if (imageMessage) {
+                                imageMessage.width = thumbDimensions.width;
+                                imageMessage.height = thumbDimensions.height;
+
+                                if (isChannel) {
+                                    // Guarantee no encrypted E2EE media keys are attached to public channel messages
+                                    delete imageMessage.mediaKey;
+                                    delete imageMessage.mediaKeyTimestamp;
+                                    delete imageMessage.fileEncSha256;
                                 }
+
+                                urlInfo.highQualityThumbnail = imageMessage;
                             }
-
-                            messageData.contextInfo = {
-                                externalAdReply: {
-                                    title: urlInfo.title || 'Product Preview',
-                                    body: urlInfo.description || '',
-                                    mediaType: 1,
-                                    thumbnailUrl: imgUrl,
-                                    thumbnail: inlineThumb || hqBuffer,
-                                    sourceUrl: matchedUrl,
-                                    renderLargerThumbnail: true,
-                                    showAdAttribution: false
-                                }
-                            };
                         }
                     } catch (imgErr) {
                         console.warn(`[WhatsApp] Thumbnail download/upload failed for ${matchedUrl}, using fallback preview: ${imgErr.message}`);
