@@ -435,7 +435,7 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
                         }
                     } else {
                         const replyText = typeof replyPayload === 'object' ? (replyPayload.body || replyPayload.text || String(replyPayload)) : String(replyPayload);
-                        const replyMessageData = await buildTextMessageWithPreview(replyText, sock);
+                        const replyMessageData = await buildTextMessageWithPreview(replyText, sock, remoteJid);
                         await sock.sendMessage(remoteJid, replyMessageData, { quoted: msg });
                         
                         // Save auto-reply message into ChatMessage cache as outgoing
@@ -457,7 +457,7 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
                     const aiReply = await aiChatbot.generateResponse({ sessionId, remoteJid, userText: textBody });
                     if (aiReply) {
                         console.log(`[AI Chatbot] Sending AI response for session ${sessionId} to ${remoteJid}`);
-                        const aiMessageData = await buildTextMessageWithPreview(aiReply, sock);
+                        const aiMessageData = await buildTextMessageWithPreview(aiReply, sock, remoteJid);
                         await sock.sendMessage(remoteJid, aiMessageData, { quoted: msg });
 
                         const ChatMessage = require('../models/ChatMessage');
@@ -592,10 +592,20 @@ async function getJoinedGroups(sessionId) {
  * Wrapped in try-catch so preview failures gracefully fall back to plain text.
  *
  * @param {string} text - Message text
- * @param {object} [sock] - Optional Baileys socket (used for high-res thumbnail upload)
+/**
+ * Build a Baileys text message payload with high-quality link preview when the
+ * text contains an http/https URL. Sends the official WhatsApp crawler User-Agent
+ * so dynamic e-commerce/SSR URLs (e.g. ?item=...) return product-specific OpenGraph
+ * title, description, and image instead of generic homepage metadata.
+ * Generates crisp 640px baseline JPEG thumbnails so mobile devices render crystal-clear
+ * previews without blur or pixelation.
+ *
+ * @param {string} text - Message text
+ * @param {object} [sock] - Optional Baileys socket
+ * @param {string} [targetJid] - Target JID (used to detect channels vs direct chats)
  * @returns {Promise<{ text: string, linkPreview?: object }>}
  */
-async function buildTextMessageWithPreview(text, sock = null) {
+async function buildTextMessageWithPreview(text, sock = null, targetJid = null) {
     const messageData = { text };
     if (typeof text !== 'string' || !text) {
         return messageData;
@@ -618,9 +628,9 @@ async function buildTextMessageWithPreview(text, sock = null) {
 
     try {
         if (typeof getUrlInfo === 'function') {
-            // 1. Fetch OpenGraph metadata using WhatsApp crawler User-Agent
+            // 1. Fetch OpenGraph metadata with high thumbnail width
             const urlInfo = await getUrlInfo(matchedUrl, {
-                thumbnailWidth: 300,
+                thumbnailWidth: 640,
                 fetchOpts,
                 logger
             });
@@ -628,45 +638,71 @@ async function buildTextMessageWithPreview(text, sock = null) {
             if (urlInfo) {
                 urlInfo['matched-text'] = matchedUrl;
 
-                // 2. Download the OpenGraph image and transcode to baseline JPEG (many CDNs such as
-                // JioMart CDN serve image/avif or image/webp even for .jpg URLs, which causes WhatsApp
-                // to render a blank/black box if uploaded raw without JPEG conversion).
-                if (urlInfo.originalThumbnailUrl) {
+                let imgUrl = urlInfo.originalThumbnailUrl;
+                if (imgUrl && !imgUrl.startsWith('http://') && !imgUrl.startsWith('https://')) {
+                    try {
+                        imgUrl = new URL(imgUrl, matchedUrl).href;
+                    } catch (_) {}
+                }
+
+                // 2. Download and generate high-resolution, unblurred baseline JPEG (JioMart/CDNs often serve
+                // AVIF/WebP which need transcoding and high pixel density for mobile cards).
+                if (imgUrl) {
                     try {
                         const axios = require('axios');
-                        const imgResp = await axios.get(urlInfo.originalThumbnailUrl, {
+                        const imgResp = await axios.get(imgUrl, {
                             responseType: 'arraybuffer',
                             timeout: 8000,
                             headers: {
                                 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                                'accept': 'image/jpeg,image/png,image/*;q=0.8'
+                                'accept': 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8'
                             }
                         });
                         const rawImgBuffer = Buffer.from(imgResp.data);
 
-                        let hqJpegBuffer = rawImgBuffer;
+                        let finalThumbBuffer = null;
+                        let thumbDimensions = { width: 640, height: 640 };
+
                         try {
                             const sharp = require('sharp');
-                            // Generate clean 300px inline JPEG thumbnail (white background for transparent PNG/WebP/AVIF)
-                            urlInfo.jpegThumbnail = await sharp(rawImgBuffer)
+                            // Generate crisp 640px JPEG with white background flattening
+                            finalThumbBuffer = await sharp(rawImgBuffer)
                                 .flatten({ background: { r: 255, g: 255, b: 255 } })
-                                .resize({ width: 300, withoutEnlargement: true })
-                                .jpeg({ quality: 80, progressive: false })
+                                .resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: true })
+                                .jpeg({ quality: 82, progressive: false })
                                 .toBuffer();
 
-                            // Generate clean 600px baseline JPEG buffer for WhatsApp highQualityThumbnail upload
-                            hqJpegBuffer = await sharp(rawImgBuffer)
-                                .flatten({ background: { r: 255, g: 255, b: 255 } })
-                                .resize({ width: 600, withoutEnlargement: true })
-                                .jpeg({ quality: 85, progressive: false })
-                                .toBuffer();
+                            // Ensure size stays within WhatsApp safe inline limit (< 80KB)
+                            if (finalThumbBuffer.length > 80000) {
+                                finalThumbBuffer = await sharp(rawImgBuffer)
+                                    .flatten({ background: { r: 255, g: 255, b: 255 } })
+                                    .resize({ width: 600, height: 600, fit: 'inside', withoutEnlargement: true })
+                                    .jpeg({ quality: 75, progressive: false })
+                                    .toBuffer();
+                            }
+
+                            const meta = await sharp(finalThumbBuffer).metadata();
+                            thumbDimensions.width = meta.width || 640;
+                            thumbDimensions.height = meta.height || 640;
+
+                            urlInfo.jpegThumbnail = finalThumbBuffer;
                         } catch (sharpErr) {
                             console.warn(`[WhatsApp] Sharp JPEG conversion fallback for ${matchedUrl}: ${sharpErr.message}`);
                         }
 
-                        if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function') {
+                        const isChannel = targetJid && (
+                            targetJid.endsWith('@newsletter') ||
+                            (typeof isJidNewsletter === 'function' && isJidNewsletter(targetJid))
+                        );
+
+                        // CRITICAL: For WhatsApp Channels (@newsletter), NEVER attach highQualityThumbnail with encrypted mediaKey!
+                        // WhatsApp Channel subscribers do not possess E2EE sender keys. If thumbnailDirectPath is attached to a channel
+                        // message, mobile WhatsApp clients cannot decrypt it and permanently render the thumbnail with a blurry loading filter.
+                        // By omitting highQualityThumbnail for channels, WhatsApp immediately displays the crisp 640px inline jpegThumbnail
+                        // with 100% clarity and zero blur.
+                        if (!isChannel && sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && finalThumbBuffer) {
                             const { imageMessage } = await prepareWAMessageMedia(
-                                { image: hqJpegBuffer },
+                                { image: finalThumbBuffer },
                                 {
                                     upload: sock.waUploadToServer,
                                     mediaTypeOverride: 'thumbnail-link',
@@ -674,8 +710,12 @@ async function buildTextMessageWithPreview(text, sock = null) {
                                 }
                             );
                             if (imageMessage) {
+                                imageMessage.width = thumbDimensions.width;
+                                imageMessage.height = thumbDimensions.height;
                                 urlInfo.highQualityThumbnail = imageMessage;
                             }
+                        } else {
+                            delete urlInfo.highQualityThumbnail;
                         }
                     } catch (imgErr) {
                         console.warn(`[WhatsApp] Thumbnail download/upload failed for ${matchedUrl}, using fallback preview: ${imgErr.message}`);
@@ -704,7 +744,7 @@ async function sendTextMessage(sessionId, toJid, text) {
     const sock = activeSockets.get(sessionId);
     if (!sock) throw new Error(`Session ${sessionId} is not connected`);
     const jid = jidNormalizedUser(toJid);
-    const messageData = await buildTextMessageWithPreview(text, sock);
+    const messageData = await buildTextMessageWithPreview(text, sock, jid);
     return await sock.sendMessage(jid, messageData);
 }
 

@@ -171,7 +171,7 @@ class CampaignSender extends EventEmitter {
             switch (campaign.message.type) {
                 case 'text': {
                     const { buildTextMessageWithPreview } = require('./whatsapp');
-                    messageData = await buildTextMessageWithPreview(messageContent, session.sock);
+                    messageData = await buildTextMessageWithPreview(messageContent, session.sock, jid);
                     break;
                 }
 

@@ -1417,7 +1417,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             let payload = message;
             if (message && typeof message.text === 'string') {
                 const { buildTextMessageWithPreview } = require('../services/whatsapp');
-                payload = await buildTextMessageWithPreview(message.text, sock);
+                payload = await buildTextMessageWithPreview(message.text, sock, jid);
             }
             const result = await sock.sendMessage(jid, payload);
             return { status: 'success', message: `Message sent to ${to}`, messageId: result.key.id };
