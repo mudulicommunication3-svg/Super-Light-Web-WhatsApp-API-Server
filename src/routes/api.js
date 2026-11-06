@@ -1491,14 +1491,36 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         const messageContents = []; // Track message contents with formatting
 
         for (const msg of messages) {
-            const { recipient_type, to, type, text, image, document } = msg;
+            let { recipient_type, to, type, text, image, document } = msg;
             // Input validation
             if (!to || !type) {
                 results.push({ status: 'error', message: 'Invalid message format. "to" and "type" are required.' });
                 continue;
             }
+
+            to = String(to).trim();
+
+            // Auto-detect and resolve WhatsApp channel invite link (e.g., https://whatsapp.com/channel/CODE)
+            const channelLinkMatch = to.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
+            if (channelLinkMatch) {
+                const inviteCode = channelLinkMatch[1];
+                try {
+                    if (session.sock && typeof session.sock.newsletterMetadata === 'function') {
+                        const meta = await session.sock.newsletterMetadata('invite', inviteCode);
+                        if (meta && meta.id) {
+                            to = meta.id;
+                        }
+                    }
+                } catch (err) {
+                    log('Channel resolution failed', sessionId, { error: err.message, inviteCode });
+                }
+            } else if (/^\d{16,25}$/.test(to) && (recipient_type === 'channel' || recipient_type === 'newsletter' || recipient_type === 'group')) {
+                // If 16+ digits are passed for channel/newsletter/group without domain suffix, append @newsletter or @g.us
+                to = (recipient_type === 'channel' || recipient_type === 'newsletter') ? `${to}@newsletter` : `${to}@g.us`;
+            }
+
             if (!isValidPhoneNumber(to)) {
-                results.push({ status: 'error', message: 'Invalid recipient format. Use E.164 format (e.g., 6281234567890) or JID format (e.g., 6281234567890@s.whatsapp.net).' });
+                results.push({ status: 'error', message: 'Invalid recipient format. Use E.164 format (e.g., 6281234567890), JID format (e.g., 6281234567890@s.whatsapp.net), group JID (e.g., 123456@g.us), or channel JID (e.g., 120363414065601906@newsletter).' });
                 continue;
             }
 
@@ -1558,7 +1580,13 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             messageContents.push(messageContent);
 
             let destination;
-            if (recipient_type === 'group') {
+            if (to.endsWith('@newsletter')) {
+                destination = to;
+            } else if (to.endsWith('@g.us')) {
+                destination = to;
+            } else if (recipient_type === 'channel' || recipient_type === 'newsletter') {
+                destination = to.endsWith('@newsletter') ? to : `${to}@newsletter`;
+            } else if (recipient_type === 'group') {
                 destination = to.endsWith('@g.us') ? to : `${to}@g.us`;
             } else {
                 destination = jidNormalizedUser(to.includes('@') ? to : `${to.replace(/^\+/, '')}@s.whatsapp.net`);
@@ -1676,6 +1704,43 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             res.status(200).json({ status: 'success', data: groups });
         } catch (error) {
             res.status(500).json({ status: 'error', message: error.message });
+        }
+    });
+
+    // Channel/Newsletter Resolver Endpoint: GET /api/v1/channels/resolve?sessionId=...&url=... (or code=...)
+    router.get('/channels/resolve', async (req, res) => {
+        const { sessionId, url, code } = req.query;
+        if (!sessionId) {
+            return res.status(400).json({ status: 'error', message: 'sessionId query parameter is required.' });
+        }
+        const session = sessions.get(sessionId);
+        if (!session || !session.sock || session.status !== 'CONNECTED') {
+            return res.status(404).json({ status: 'error', message: `Session ${sessionId} not found or not connected.` });
+        }
+        let inviteCode = code;
+        if (!inviteCode && url) {
+            const match = String(url).match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
+            if (match) inviteCode = match[1];
+        }
+        if (!inviteCode) {
+            return res.status(400).json({ status: 'error', message: 'Channel URL or invite code is required.' });
+        }
+        try {
+            if (typeof session.sock.newsletterMetadata !== 'function') {
+                return res.status(501).json({ status: 'error', message: 'Newsletter resolution is not supported by this session connection.' });
+            }
+            const meta = await session.sock.newsletterMetadata('invite', inviteCode);
+            res.status(200).json({
+                status: 'success',
+                data: {
+                    id: meta.id,
+                    name: meta.name,
+                    subscribers: meta.subscribers,
+                    description: meta.description
+                }
+            });
+        } catch (error) {
+            res.status(500).json({ status: 'error', message: `Failed to resolve channel: ${error.message}` });
         }
     });
 

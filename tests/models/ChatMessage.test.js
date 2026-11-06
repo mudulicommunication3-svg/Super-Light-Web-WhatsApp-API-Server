@@ -9,8 +9,14 @@ describe('ChatMessage Model', () => {
     const testSession = 'test';
     const testJid = '6281234567890@s.whatsapp.net';
 
+    beforeAll(() => {
+        db.prepare("DELETE FROM chat_messages WHERE id = 'msg_test_001'").run();
+        db.prepare("INSERT OR IGNORE INTO whatsapp_sessions (id, token, status) VALUES ('test', 'token_test', 'CONNECTED')").run();
+    });
+
     afterAll(() => {
         db.prepare("DELETE FROM chat_messages WHERE id = 'msg_test_001'").run();
+        db.prepare("DELETE FROM whatsapp_sessions WHERE id = 'test'").run();
     });
 
     test('should save incoming chat message', () => {

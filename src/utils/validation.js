@@ -36,10 +36,10 @@ const sanitizeId = (text) => {
 const isValidPhoneNumber = (number) => {
     if (!number || typeof number !== 'string') return false;
 
-    // Allow WhatsApp JID format (e.g., 1234567890@s.whatsapp.net)
-    if (number.endsWith('@s.whatsapp.net') || number.endsWith('@g.us')) {
+    // Allow WhatsApp JID formats: individual (@s.whatsapp.net), group (@g.us), and channel (@newsletter)
+    if (number.endsWith('@s.whatsapp.net') || number.endsWith('@g.us') || number.endsWith('@newsletter')) {
         const phonePart = number.split('@')[0];
-        return /^\d{8,15}$/.test(phonePart);
+        return /^\d{5,30}$/.test(phonePart);
     }
 
     // Strip + prefix if present for validation

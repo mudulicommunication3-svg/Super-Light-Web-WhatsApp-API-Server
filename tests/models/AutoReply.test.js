@@ -8,10 +8,15 @@ const { db } = require('../../src/config/database');
 describe('AutoReply Model', () => {
     let createdRuleId;
 
+    beforeAll(() => {
+        db.prepare("INSERT OR IGNORE INTO whatsapp_sessions (id, token, status) VALUES ('test', 'token_test', 'CONNECTED')").run();
+    });
+
     afterAll(() => {
         if (createdRuleId) {
             AutoReply.delete(createdRuleId);
         }
+        db.prepare("DELETE FROM whatsapp_sessions WHERE id = 'test'").run();
     });
 
     test('should create auto-reply rule successfully', () => {

@@ -61,6 +61,7 @@ describe('Validation Utility', () => {
         test('accepts WhatsApp JID formats', () => {
             expect(isValidPhoneNumber('6281234567890@s.whatsapp.net')).toBe(true);
             expect(isValidPhoneNumber('123456789012345@g.us')).toBe(true);
+            expect(isValidPhoneNumber('120363414065601906@newsletter')).toBe(true);
         });
 
         test('rejects invalid numbers', () => {

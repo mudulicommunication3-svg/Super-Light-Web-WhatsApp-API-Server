@@ -646,6 +646,10 @@
                         <i class="bi bi-sliders"></i>
                         <span>API Control</span>
                     </a>
+                    <a href="#api-control" class="sidebar-link" onclick="openChannelPosterTab();">
+                        <i class="bi bi-broadcast"></i>
+                        <span>Channel Poster</span>
+                    </a>
                     <a href="#api-reference" class="sidebar-link">
                         <i class="bi bi-code-slash"></i>
                         <span>cURL Examples</span>
@@ -751,6 +755,9 @@
                                         <li class="nav-item" role="presentation">
                                             <button class="nav-link" id="combo-tab" data-bs-toggle="tab" data-bs-target="#combo-panel" type="button" role="tab"><i class="bi bi-collection-fill me-1"></i> Combo Payload</button>
                                         </li>
+                                        <li class="nav-item" role="presentation">
+                                            <button class="nav-link text-primary fw-semibold" id="channel-tab" data-bs-toggle="tab" data-bs-target="#channel-panel" type="button" role="tab"><i class="bi bi-broadcast me-1"></i> Channel Poster</button>
+                                        </li>
                                     </ul>
                                     <div class="tab-content" id="api-tab-content">
                                         <!-- Text Panel -->
@@ -811,6 +818,53 @@
                                                 <i class="bi bi-send-fill me-1"></i> Send All Messages
                                             </button>
                                         </div>
+
+                                        <!-- Channel Poster Panel -->
+                                        <div class="tab-pane fade" id="channel-panel" role="tabpanel">
+                                            <div class="alert alert-primary bg-primary-subtle border-primary-subtle d-flex align-items-center mb-3">
+                                                <i class="bi bi-broadcast fs-3 text-primary me-3"></i>
+                                                <div>
+                                                    <div class="fw-bold">Direct WhatsApp Channel / Newsletter Poster</div>
+                                                    <div class="small text-muted">Post product links, deals, or announcements to WhatsApp Channels with auto-generated rich link previews.</div>
+                                                </div>
+                                            </div>
+
+                                            <div class="mb-3">
+                                                <label for="channel-target" class="form-label fw-bold">
+                                                    Channel ID or Link <span class="text-danger">*</span>
+                                                </label>
+                                                <div class="input-group">
+                                                    <span class="input-group-text bg-body-tertiary"><i class="bi bi-hash"></i></span>
+                                                    <input type="text" class="form-control font-monospace" id="channel-target" placeholder="120363414065601906@newsletter OR https://whatsapp.com/channel/..." onblur="cleanChannelInput()" oninput="autoFormatChannelInput()">
+                                                    <button class="btn btn-outline-primary" type="button" onclick="cleanChannelInput(true)" id="btn-detect-channel" title="Detect & clean channel link or ID">
+                                                        <i class="bi bi-magic me-1"></i> Auto-Detect JID
+                                                    </button>
+                                                </div>
+                                                <div class="form-text" id="channel-target-help">
+                                                    Paste your Channel JID (e.g. <code>120363414065601906@newsletter</code>), raw ID (<code>120363414065601906</code>), or WhatsApp Channel link.
+                                                </div>
+                                                <div id="channel-meta-badge" class="mt-2" style="display:none;"></div>
+                                            </div>
+
+                                            <div class="mb-3">
+                                                <label for="channel-message" class="form-label fw-bold">
+                                                    Product Link / Message <span class="text-danger">*</span>
+                                                </label>
+                                                <textarea class="form-control" id="channel-message" rows="5" placeholder="Paste your product URL, offer, or broadcast message...&#10;e.g. https://www.munagrocery.in/?item=8909106011045&sp=799&mrp=930"></textarea>
+                                                <div class="form-text">
+                                                    <i class="bi bi-link-45deg text-primary"></i> Product links automatically fetch title, description, and high-definition preview images for the channel.
+                                                </div>
+                                            </div>
+
+                                            <div class="d-flex gap-2">
+                                                <button class="btn btn-primary px-4 py-2" onclick="sendToChannel(this)" id="btn-send-channel">
+                                                    <i class="bi bi-send-fill me-1"></i> Send to Channel
+                                                </button>
+                                                <button class="btn btn-outline-secondary px-3 py-2" type="button" onclick="clearChannelFields()">
+                                                    <i class="bi bi-eraser me-1"></i> Clear
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -850,6 +904,9 @@
                                 </li>
                                 <li class="nav-item" role="presentation">
                                     <button class="nav-link" id="curl-webhook-tab" data-bs-toggle="tab" data-bs-target="#curl-webhook" type="button" role="tab">Webhook</button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="curl-channel-tab" data-bs-toggle="tab" data-bs-target="#curl-channel" type="button" role="tab"><i class="bi bi-broadcast me-1"></i> WhatsApp Channel</button>
                                 </li>
                             </ul>
                             <div class="tab-content" id="curlExampleTabsContent">
@@ -931,6 +988,25 @@
 -H "Content-Type: application/json" \
 -d '{ "sessionId": "YOUR_SESSION_ID" }'</code></pre>
                                         <button class="btn btn-sm btn-outline-secondary mb-2" onclick="copyCurl('curl-delete-webhook', this)">Copy</button>
+                                    </div>
+                                </div>
+                                <div class="tab-pane fade" id="curl-channel" role="tabpanel">
+                                    <div class="mb-3">
+                                        <strong>Send Message / Product Link with Preview to WhatsApp Channel</strong>
+                                        <pre><code id="curl-send-channel">curl -X POST "http://localhost:3000/api/v1/messages?sessionId=YOUR_SESSION_ID" \
+-H "Authorization: Bearer YOUR_TOKEN" \
+-H "Content-Type: application/json" \
+-d '[
+  {
+    "recipient_type": "group",
+    "to": "120363414065601906@newsletter",
+    "type": "text",
+    "text": {
+      "body": "https://www.munagrocery.in/?item=8909106011045&sp=799&mrp=930"
+    }
+  }
+]'</code></pre>
+                                        <button class="btn btn-sm btn-outline-secondary mb-2" onclick="copyCurl('curl-send-channel', this)">Copy</button>
                                     </div>
                                 </div>
                             </div>
@@ -1322,15 +1398,15 @@
 
         function updateApiUsage() {
             const sessionId = apiSessionIdSelect.value;
-            const recipient = apiRecipientInput.value;
-            if (!sessionId || !recipient) {
-                apiUsageExample.textContent = 'Please select a session and enter a recipient to see an example.';
+            const activeTabEl = document.querySelector('#api-tabs .nav-link.active');
+            const activeTab = activeTabEl ? activeTabEl.id : 'text-tab';
+            const channelTarget = document.getElementById('channel-target')?.value?.trim();
+            const recipient = (activeTab === 'channel-tab' && channelTarget) ? channelTarget : apiRecipientInput.value;
+
+            if (!sessionId || (!recipient && activeTab !== 'channel-tab')) {
+                apiUsageExample.textContent = 'Please select a session and enter a recipient or channel ID to see an example.';
                 return;
             }
-
-            const activeTabEl = document.querySelector('#api-tabs .nav-link.active');
-            if (!activeTabEl) return;
-            const activeTab = activeTabEl.id;
 
             let payload;
             let endpoint = `/api/v1/messages?sessionId=${sessionId}`;
@@ -1342,6 +1418,15 @@
                 payload = {
                     recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
                     to: recipient,
+                    type: 'text',
+                    text: { body: message }
+                };
+            } else if (activeTab === 'channel-tab') {
+                const target = channelTarget || '120363414065601906@newsletter';
+                const message = document.getElementById('channel-message')?.value || 'https://www.munagrocery.in/?item=8909106011045&sp=799&mrp=930';
+                payload = {
+                    recipient_type: 'group',
+                    to: target,
                     type: 'text',
                     text: { body: message }
                 };
@@ -1480,6 +1565,137 @@
                 type: 'text',
                 text: { body: message }
             };
+            await sendApiRequest([payload], btn);
+        }
+
+        function autoFormatChannelInput() {
+            const input = document.getElementById('channel-target');
+            if (!input) return;
+            const val = input.value.trim();
+            if (/^\d{16,25}$/.test(val)) {
+                input.value = val + '@newsletter';
+            }
+            updateApiUsage();
+        }
+
+        async function cleanChannelInput(showFeedback = false) {
+            const input = document.getElementById('channel-target');
+            const badge = document.getElementById('channel-meta-badge');
+            if (!input) return;
+            let val = input.value.trim();
+            if (!val) return;
+
+            // Handle WhatsApp Channel invite link (e.g. https://whatsapp.com/channel/CODE)
+            const channelLinkMatch = val.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
+            if (channelLinkMatch) {
+                const inviteCode = channelLinkMatch[1];
+                const sessionId = apiSessionIdSelect.value;
+                const sessionData = sessionsData.get(sessionId);
+                const currentToken = sessionData ? sessionData.token : '';
+
+                if (badge) {
+                    badge.style.display = 'block';
+                    badge.className = 'mt-2 alert alert-info py-1 px-2 small d-inline-flex align-items-center';
+                    badge.innerHTML = `<span class="spinner-border spinner-border-sm me-2"></span> Resolving channel invite code <code>${inviteCode}</code>...`;
+                }
+
+                try {
+                    const res = await fetch(`/api/v1/channels/resolve?sessionId=${sessionId}&code=${inviteCode}`, {
+                        headers: currentToken ? { 'Authorization': `Bearer ${currentToken}` } : {}
+                    });
+                    const data = await res.json();
+                    if (res.ok && data.data && data.data.id) {
+                        input.value = data.data.id;
+                        if (badge) {
+                            badge.className = 'mt-2 alert alert-success py-1 px-2 small d-inline-flex align-items-center';
+                            badge.innerHTML = `<i class="bi bi-check-circle-fill me-1 text-success"></i> <strong>${data.data.name || 'Channel'}</strong> (${data.data.id})`;
+                        }
+                        updateApiUsage();
+                        return;
+                    } else if (data.data && data.data.id) {
+                        input.value = data.data.id;
+                    }
+                } catch (e) {
+                    console.warn('Channel resolve query failed, falling back:', e);
+                }
+            }
+
+            // Raw digits check: 16+ digits is a channel or newsletter JID
+            if (/^\d{16,25}$/.test(val)) {
+                input.value = val + '@newsletter';
+            }
+
+            if (showFeedback && badge) {
+                if (input.value.endsWith('@newsletter')) {
+                    badge.style.display = 'block';
+                    badge.className = 'mt-2 alert alert-success py-1 px-2 small d-inline-flex align-items-center';
+                    badge.innerHTML = `<i class="bi bi-check-circle-fill me-1 text-success"></i> Valid Channel JID: <code>${input.value}</code>`;
+                } else {
+                    badge.style.display = 'block';
+                    badge.className = 'mt-2 alert alert-warning py-1 px-2 small d-inline-flex align-items-center';
+                    badge.innerHTML = `<i class="bi bi-exclamation-circle-fill me-1 text-warning"></i> Format should end with <code>@newsletter</code>`;
+                }
+            }
+            updateApiUsage();
+        }
+
+        function clearChannelFields() {
+            const input = document.getElementById('channel-target');
+            const msg = document.getElementById('channel-message');
+            const badge = document.getElementById('channel-meta-badge');
+            if (input) input.value = '';
+            if (msg) msg.value = '';
+            if (badge) {
+                badge.style.display = 'none';
+                badge.innerHTML = '';
+            }
+            updateApiUsage();
+        }
+
+        function openChannelPosterTab() {
+            const channelTabBtn = document.getElementById('channel-tab');
+            if (channelTabBtn) {
+                const tab = new bootstrap.Tab(channelTabBtn);
+                tab.show();
+                setTimeout(() => {
+                    document.getElementById('channel-target')?.focus();
+                }, 150);
+            }
+        }
+
+        async function sendToChannel(btn = null) {
+            let channelTarget = document.getElementById('channel-target')?.value.trim();
+            const message = document.getElementById('channel-message')?.value.trim();
+
+            if (!channelTarget) {
+                alert('Please enter a WhatsApp Channel ID or invite link.');
+                document.getElementById('channel-target')?.focus();
+                return;
+            }
+            if (!message) {
+                alert('Please enter a product link or message to send.');
+                document.getElementById('channel-message')?.focus();
+                return;
+            }
+
+            if (/^\d{16,25}$/.test(channelTarget)) {
+                channelTarget = channelTarget + '@newsletter';
+                document.getElementById('channel-target').value = channelTarget;
+            }
+
+            // User requirement:
+            // - recipient_type: "group"
+            // - to: <channel_jid>
+            // - type: "text" (with link preview)
+            // - text: { body: <product_link_or_message> }
+            // - active session Bearer Token in headers
+            const payload = {
+                recipient_type: 'group',
+                to: channelTarget,
+                type: 'text',
+                text: { body: message }
+            };
+
             await sendApiRequest([payload], btn);
         }
 
