@@ -698,20 +698,35 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
                         }
 
                         // Attach highQualityThumbnail with directPath and explicit dimensions for BIG IMAGE PREVIEW.
-                        // WhatsApp clients (both Channels @newsletter and chats) check for thumbnailDirectPath + thumbnailWidth/Height
-                        // to decide whether to render the large full-width banner card or fall back to a mini preview.
+                        // WhatsApp clients check for thumbnailDirectPath + thumbnailWidth/Height to render the large banner card.
+                        // CRITICAL: Passing jid: targetJid signals Baileys to upload raw, unencrypted public media for Channels (@newsletter).
+                        // If mediaKey/fileEncSha256 is present on a channel message, subscribers cannot decrypt it and WhatsApp renders a black blank box.
                         if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && (hqBuffer || inlineThumb)) {
+                            const isChannel = Boolean(targetJid && (
+                                targetJid.endsWith('@newsletter') ||
+                                (typeof isJidNewsletter === 'function' && isJidNewsletter(targetJid))
+                            ));
+
                             const { imageMessage } = await prepareWAMessageMedia(
                                 { image: hqBuffer || inlineThumb },
                                 {
                                     upload: sock.waUploadToServer,
                                     mediaTypeOverride: 'thumbnail-link',
+                                    jid: targetJid || undefined,
                                     logger
                                 }
                             );
                             if (imageMessage) {
                                 imageMessage.width = thumbDimensions.width;
                                 imageMessage.height = thumbDimensions.height;
+
+                                if (isChannel) {
+                                    // Guarantee no encrypted E2EE media keys are attached to public channel messages
+                                    delete imageMessage.mediaKey;
+                                    delete imageMessage.mediaKeyTimestamp;
+                                    delete imageMessage.fileEncSha256;
+                                }
+
                                 urlInfo.highQualityThumbnail = imageMessage;
                             }
                         }
