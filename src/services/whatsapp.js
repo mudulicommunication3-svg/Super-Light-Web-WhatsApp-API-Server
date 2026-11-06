@@ -660,49 +660,49 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
                         });
                         const rawImgBuffer = Buffer.from(imgResp.data);
 
-                        let finalThumbBuffer = null;
-                        let thumbDimensions = { width: 640, height: 640 };
+                        let hqBuffer = null;
+                        let inlineThumb = null;
+                        let thumbDimensions = { width: 800, height: 800 };
 
                         try {
                             const sharp = require('sharp');
-                            // Generate crisp 640px JPEG with white background flattening
-                            finalThumbBuffer = await sharp(rawImgBuffer)
+                            // 1. Generate high-definition 800px JPEG for Big Image Preview card (with clean white background)
+                            hqBuffer = await sharp(rawImgBuffer)
                                 .flatten({ background: { r: 255, g: 255, b: 255 } })
-                                .resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: true })
-                                .jpeg({ quality: 82, progressive: false })
+                                .resize({ width: 800, height: 800, fit: 'inside', withoutEnlargement: true })
+                                .jpeg({ quality: 85, progressive: false })
                                 .toBuffer();
 
-                            // Ensure size stays within WhatsApp safe inline limit (< 80KB)
-                            if (finalThumbBuffer.length > 80000) {
-                                finalThumbBuffer = await sharp(rawImgBuffer)
+                            const hqMeta = await sharp(hqBuffer).metadata();
+                            thumbDimensions.width = hqMeta.width || 800;
+                            thumbDimensions.height = hqMeta.height || 800;
+
+                            // 2. Generate crisp 640px inline fallback thumbnail (must stay < 80KB for WhatsApp proto)
+                            inlineThumb = await sharp(rawImgBuffer)
+                                .flatten({ background: { r: 255, g: 255, b: 255 } })
+                                .resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: true })
+                                .jpeg({ quality: 80, progressive: false })
+                                .toBuffer();
+
+                            if (inlineThumb.length > 80000) {
+                                inlineThumb = await sharp(rawImgBuffer)
                                     .flatten({ background: { r: 255, g: 255, b: 255 } })
-                                    .resize({ width: 600, height: 600, fit: 'inside', withoutEnlargement: true })
+                                    .resize({ width: 550, height: 550, fit: 'inside', withoutEnlargement: true })
                                     .jpeg({ quality: 75, progressive: false })
                                     .toBuffer();
                             }
 
-                            const meta = await sharp(finalThumbBuffer).metadata();
-                            thumbDimensions.width = meta.width || 640;
-                            thumbDimensions.height = meta.height || 640;
-
-                            urlInfo.jpegThumbnail = finalThumbBuffer;
+                            urlInfo.jpegThumbnail = inlineThumb;
                         } catch (sharpErr) {
-                            console.warn(`[WhatsApp] Sharp JPEG conversion fallback for ${matchedUrl}: ${sharpErr.message}`);
+                            console.warn(`[WhatsApp] Sharp processing for ${matchedUrl}: ${sharpErr.message}`);
                         }
 
-                        const isChannel = targetJid && (
-                            targetJid.endsWith('@newsletter') ||
-                            (typeof isJidNewsletter === 'function' && isJidNewsletter(targetJid))
-                        );
-
-                        // CRITICAL: For WhatsApp Channels (@newsletter), NEVER attach highQualityThumbnail with encrypted mediaKey!
-                        // WhatsApp Channel subscribers do not possess E2EE sender keys. If thumbnailDirectPath is attached to a channel
-                        // message, mobile WhatsApp clients cannot decrypt it and permanently render the thumbnail with a blurry loading filter.
-                        // By omitting highQualityThumbnail for channels, WhatsApp immediately displays the crisp 640px inline jpegThumbnail
-                        // with 100% clarity and zero blur.
-                        if (!isChannel && sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && finalThumbBuffer) {
+                        // Attach highQualityThumbnail with directPath and explicit dimensions for BIG IMAGE PREVIEW.
+                        // WhatsApp clients (both Channels @newsletter and chats) check for thumbnailDirectPath + thumbnailWidth/Height
+                        // to decide whether to render the large full-width banner card or fall back to a mini preview.
+                        if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && (hqBuffer || inlineThumb)) {
                             const { imageMessage } = await prepareWAMessageMedia(
-                                { image: finalThumbBuffer },
+                                { image: hqBuffer || inlineThumb },
                                 {
                                     upload: sock.waUploadToServer,
                                     mediaTypeOverride: 'thumbnail-link',
@@ -714,8 +714,6 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
                                 imageMessage.height = thumbDimensions.height;
                                 urlInfo.highQualityThumbnail = imageMessage;
                             }
-                        } else {
-                            delete urlInfo.highQualityThumbnail;
                         }
                     } catch (imgErr) {
                         console.warn(`[WhatsApp] Thumbnail download/upload failed for ${matchedUrl}, using fallback preview: ${imgErr.message}`);
