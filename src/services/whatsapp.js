@@ -611,44 +611,75 @@ async function buildTextMessageWithPreview(text, sock = null) {
         timeout: 8000,
         headers: {
             'user-agent': 'WhatsApp/2.24.16.78 A',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'accept-language': 'en-US,en;q=0.9'
         }
     };
 
     try {
         if (typeof getUrlInfo === 'function') {
-            // 1. Fetch OpenGraph metadata and generate a crisp 512px jpegThumbnail
+            // 1. Fetch OpenGraph metadata using WhatsApp crawler User-Agent
             const urlInfo = await getUrlInfo(matchedUrl, {
-                thumbnailWidth: 512,
+                thumbnailWidth: 300,
                 fetchOpts,
                 logger
             });
 
             if (urlInfo) {
-                // Ensure matched-text matches the exact URL substring in the message
                 urlInfo['matched-text'] = matchedUrl;
 
-                // 2. Also upload highQualityThumbnail to WhatsApp servers when socket is available,
-                // while preserving the 512px jpegThumbnail for inline preview cards.
-                if (sock?.waUploadToServer && urlInfo.originalThumbnailUrl && typeof prepareWAMessageMedia === 'function') {
+                // 2. Download the OpenGraph image and transcode to baseline JPEG (many CDNs such as
+                // JioMart CDN serve image/avif or image/webp even for .jpg URLs, which causes WhatsApp
+                // to render a blank/black box if uploaded raw without JPEG conversion).
+                if (urlInfo.originalThumbnailUrl) {
                     try {
-                        const { imageMessage } = await prepareWAMessageMedia(
-                            { image: { url: urlInfo.originalThumbnailUrl } },
-                            {
-                                upload: sock.waUploadToServer,
-                                mediaTypeOverride: 'thumbnail-link',
-                                options: fetchOpts
+                        const axios = require('axios');
+                        const imgResp = await axios.get(urlInfo.originalThumbnailUrl, {
+                            responseType: 'arraybuffer',
+                            timeout: 8000,
+                            headers: {
+                                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                'accept': 'image/jpeg,image/png,image/*;q=0.8'
                             }
-                        );
-                        if (imageMessage) {
-                            urlInfo.highQualityThumbnail = imageMessage;
-                            if (!urlInfo.jpegThumbnail && imageMessage.jpegThumbnail) {
-                                urlInfo.jpegThumbnail = Buffer.from(imageMessage.jpegThumbnail);
+                        });
+                        const rawImgBuffer = Buffer.from(imgResp.data);
+
+                        let hqJpegBuffer = rawImgBuffer;
+                        try {
+                            const sharp = require('sharp');
+                            // Generate clean 300px inline JPEG thumbnail (white background for transparent PNG/WebP/AVIF)
+                            urlInfo.jpegThumbnail = await sharp(rawImgBuffer)
+                                .flatten({ background: { r: 255, g: 255, b: 255 } })
+                                .resize({ width: 300, withoutEnlargement: true })
+                                .jpeg({ quality: 80, progressive: false })
+                                .toBuffer();
+
+                            // Generate clean 600px baseline JPEG buffer for WhatsApp highQualityThumbnail upload
+                            hqJpegBuffer = await sharp(rawImgBuffer)
+                                .flatten({ background: { r: 255, g: 255, b: 255 } })
+                                .resize({ width: 600, withoutEnlargement: true })
+                                .jpeg({ quality: 85, progressive: false })
+                                .toBuffer();
+                        } catch (sharpErr) {
+                            console.warn(`[WhatsApp] Sharp JPEG conversion fallback for ${matchedUrl}: ${sharpErr.message}`);
+                        }
+
+                        if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function') {
+                            const { imageMessage } = await prepareWAMessageMedia(
+                                { image: hqJpegBuffer },
+                                {
+                                    upload: sock.waUploadToServer,
+                                    mediaTypeOverride: 'thumbnail-link',
+                                    logger
+                                }
+                            );
+                            if (imageMessage) {
+                                urlInfo.highQualityThumbnail = imageMessage;
                             }
                         }
-                    } catch (uploadErr) {
-                        console.warn(`[WhatsApp] High-res thumbnail upload failed for ${matchedUrl}, using inline jpegThumbnail: ${uploadErr.message}`);
+                    } catch (imgErr) {
+                        console.warn(`[WhatsApp] Thumbnail download/upload failed for ${matchedUrl}, using fallback preview: ${imgErr.message}`);
+                        delete urlInfo.highQualityThumbnail;
                     }
                 }
 
