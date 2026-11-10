@@ -740,28 +740,8 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
                 (typeof isJidNewsletter === 'function' && isJidNewsletter(targetJid))
             ));
 
-            const cardTitle = urlInfo.title || urlParamTitle || 'Munna Grocery';
-            const cardBody = urlInfo.description || (urlParamSp ? `₹${urlParamSp} (MRP ₹${urlParamMrp || urlParamSp})` : '');
-
-            // externalAdReply with renderLargerThumbnail: true produces the modern full-width banner
-            messageData.contextInfo = {
-                externalAdReply: {
-                    title: cardTitle,
-                    body: cardBody,
-                    mediaType: 1, // IMAGE
-                    thumbnailUrl: imgUrl,
-                    thumbnail: inlineThumb || hqBuffer,
-                    sourceUrl: matchedUrl,
-                    renderLargerThumbnail: true,
-                    showAdAttribution: false
-                }
-            };
-
-            if (isChannel) {
-                // In channels, do not attach encrypted MMS media keys
-                delete urlInfo.highQualityThumbnail;
-            } else {
-                if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && (hqBuffer || inlineThumb)) {
+            if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && (hqBuffer || inlineThumb)) {
+                try {
                     const { imageMessage } = await prepareWAMessageMedia(
                         { image: hqBuffer || inlineThumb },
                         {
@@ -774,9 +754,37 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
                     if (imageMessage) {
                         imageMessage.width = thumbDimensions.width;
                         imageMessage.height = thumbDimensions.height;
+
+                        if (isChannel) {
+                            // Guarantee no encrypted E2EE media keys are attached to public channel messages
+                            delete imageMessage.mediaKey;
+                            delete imageMessage.mediaKeyTimestamp;
+                            delete imageMessage.fileEncSha256;
+                        }
+
                         urlInfo.highQualityThumbnail = imageMessage;
                     }
+                } catch (mediaErr) {
+                    console.warn(`[WhatsApp] prepareWAMessageMedia failed: ${mediaErr.message}`);
                 }
+            }
+
+            // externalAdReply is for personal and group chats; channels render from highQualityThumbnail + jpegThumbnail
+            if (!isChannel) {
+                const cardTitle = urlInfo.title || urlParamTitle || 'Munna Grocery';
+                const cardBody = urlInfo.description || (urlParamSp ? `₹${urlParamSp} (MRP ₹${urlParamMrp || urlParamSp})` : '');
+                messageData.contextInfo = {
+                    externalAdReply: {
+                        title: cardTitle,
+                        body: cardBody,
+                        mediaType: 1, // IMAGE
+                        thumbnailUrl: imgUrl,
+                        thumbnail: inlineThumb || hqBuffer,
+                        sourceUrl: matchedUrl,
+                        renderLargerThumbnail: true,
+                        showAdAttribution: false
+                    }
+                };
             }
         } catch (imgErr) {
             console.warn(`[WhatsApp] Thumbnail download/upload failed for ${imgUrl}: ${imgErr.message}`);

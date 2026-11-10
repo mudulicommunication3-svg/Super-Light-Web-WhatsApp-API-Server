@@ -1500,27 +1500,41 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
             to = String(to).trim();
 
-            // Auto-detect and resolve WhatsApp channel invite link (e.g., https://whatsapp.com/channel/CODE)
+            // Auto-detect and resolve WhatsApp channel (invite URL, bare invite code, or alphanumeric@newsletter)
+            let channelInviteCode = null;
             const channelLinkMatch = to.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
             if (channelLinkMatch) {
-                const inviteCode = channelLinkMatch[1];
+                channelInviteCode = channelLinkMatch[1];
+            } else if (to.endsWith('@newsletter')) {
+                const prefix = to.replace(/@newsletter$/, '');
+                if (!/^\d{16,25}$/.test(prefix)) {
+                    channelInviteCode = prefix;
+                }
+            } else if (/^[a-zA-Z0-9_-]{14,40}$/.test(to) && !/^\d+$/.test(to)) {
+                channelInviteCode = to;
+            }
+
+            if (channelInviteCode) {
                 try {
                     if (session.sock && typeof session.sock.newsletterMetadata === 'function') {
-                        const meta = await session.sock.newsletterMetadata('invite', inviteCode);
+                        const meta = await session.sock.newsletterMetadata('invite', channelInviteCode);
                         if (meta && meta.id) {
                             to = meta.id;
+                            log('Channel resolved from invite to numeric JID', sessionId, { inviteCode: channelInviteCode, jid: to });
                         }
                     }
                 } catch (err) {
-                    log('Channel resolution failed', sessionId, { error: err.message, inviteCode });
+                    log('Channel resolution failed', sessionId, { error: err.message, inviteCode: channelInviteCode });
+                    if (!to.includes('@')) to = `${channelInviteCode}@newsletter`;
                 }
-            } else if (/^\d{16,25}$/.test(to) && (recipient_type === 'channel' || recipient_type === 'newsletter' || recipient_type === 'group')) {
-                // If 16+ digits are passed for channel/newsletter/group without domain suffix, append @newsletter or @g.us
-                to = (recipient_type === 'channel' || recipient_type === 'newsletter') ? `${to}@newsletter` : `${to}@g.us`;
+            } else if (/^\d{16,25}$/.test(to) && (recipient_type === 'channel' || recipient_type === 'newsletter')) {
+                to = `${to}@newsletter`;
+            } else if (/^\d{16,25}$/.test(to) && recipient_type === 'group') {
+                to = `${to}@g.us`;
             }
 
             if (!isValidPhoneNumber(to)) {
-                results.push({ status: 'error', message: 'Invalid recipient format. Use E.164 format (e.g., 6281234567890), JID format (e.g., 6281234567890@s.whatsapp.net), group JID (e.g., 123456@g.us), or channel JID (e.g., 120363414065601906@newsletter).' });
+                results.push({ status: 'error', message: `Invalid recipient format (${to}). Use E.164 phone, group JID (@g.us), channel link, or channel JID (@newsletter).` });
                 continue;
             }
 
@@ -1660,8 +1674,46 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             phoneNumbers: phoneNumbers,
             messages: messageContents
         });
-        res.status(200).json(results);
+        const allFailed = results.length > 0 && results.every(r => r.status === 'error');
+        const statusCode = allFailed ? 400 : 200;
+        res.status(statusCode).json(results);
     });
+
+    // Helper to resolve any recipient (invite link, bare invite code, numeric JID, or phone)
+    async function resolveTargetJid(session, rawTarget) {
+        let dest = String(rawTarget || '').trim();
+        let channelInviteCode = null;
+        const channelLinkMatch = dest.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
+        if (channelLinkMatch) {
+            channelInviteCode = channelLinkMatch[1];
+        } else if (dest.endsWith('@newsletter')) {
+            const prefix = dest.replace(/@newsletter$/, '');
+            if (!/^\d{16,25}$/.test(prefix)) {
+                channelInviteCode = prefix;
+            }
+        } else if (/^[a-zA-Z0-9_-]{14,40}$/.test(dest) && !/^\d+$/.test(dest)) {
+            channelInviteCode = dest;
+        }
+
+        if (channelInviteCode) {
+            try {
+                if (session.sock && typeof session.sock.newsletterMetadata === 'function') {
+                    const meta = await session.sock.newsletterMetadata('invite', channelInviteCode);
+                    if (meta && meta.id) {
+                        return meta.id;
+                    }
+                }
+            } catch (_) {}
+            return dest.includes('@') ? dest : `${channelInviteCode}@newsletter`;
+        }
+
+        if (dest.endsWith('@newsletter') || dest.endsWith('@g.us')) {
+            return dest;
+        }
+
+        const { jidNormalizedUser } = require('@whiskeysockets/baileys');
+        return jidNormalizedUser(dest.includes('@') ? dest : `${dest.replace(/^\+/, '')}@s.whatsapp.net`);
+    }
 
     // Delete Message Endpoint: DELETE /api/message and DELETE /api/v1/message
     const handleDeleteMessage = async (req, res) => {
@@ -1681,11 +1733,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         }
 
         try {
-            let destination = target;
-            if (!destination.endsWith('@newsletter') && !destination.endsWith('@g.us')) {
-                const { jidNormalizedUser } = require('@whiskeysockets/baileys');
-                destination = jidNormalizedUser(destination.includes('@') ? destination : `${destination.replace(/^\+/, '')}@s.whatsapp.net`);
-            }
+            const destination = await resolveTargetJid(session, target);
 
             await session.sock.sendMessage(destination, { delete: { remoteJid: destination, fromMe: true, id: messageId } });
 
@@ -1720,13 +1768,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         }
 
         try {
-            let destination;
-            if (target.endsWith('@newsletter') || target.endsWith('@g.us')) {
-                destination = target;
-            } else {
-                const { jidNormalizedUser } = require('@whiskeysockets/baileys');
-                destination = jidNormalizedUser(target.includes('@') ? target : `${target.replace(/^\+/, '')}@s.whatsapp.net`);
-            }
+            const destination = await resolveTargetJid(session, target);
 
             const { buildTextMessageWithPreview } = require('../services/whatsapp');
             const textPayload = await buildTextMessageWithPreview(updateText, session.sock, destination);
