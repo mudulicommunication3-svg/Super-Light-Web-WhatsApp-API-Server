@@ -684,16 +684,44 @@ app.use('/api/v1', apiRouter);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-// Campaign scheduler: auto-start campaigns whose scheduledAt has passed.
-// A `running` flag chains ticks so a slow tick is never overlapped by the next
-// one (which would re-read the same 'ready' campaigns mid-start and race them).
+const cloudSessionStore = require('./src/services/cloudSessionStore');
+
+// Campaign scheduler + Session Watchdog:
+// 1. Auto-starts scheduled campaigns whose scheduledAt has passed.
+// 2. Self-heals any WhatsApp session that has valid creds.json on disk but dropped its socket.
 let schedulerRunning = false;
 const schedulerInterval = setInterval(async () => {
-    if (schedulerRunning) return;
+    if (schedulerRunning || isShuttingDown) return;
     schedulerRunning = true;
     try {
         if (apiRouter && typeof apiRouter.checkAndStartScheduledCampaigns === 'function') {
             await apiRouter.checkAndStartScheduledCampaigns();
+        }
+        // Self-healing session watchdog
+        const allSessions = Session.getAll();
+        for (const s of allSessions) {
+            if (s.token && !sessionTokens.has(s.id)) {
+                sessionTokens.set(s.id, s.token);
+            }
+            const credsPath = path.join(whatsappService.AUTH_DIR, s.id, 'creds.json');
+            if (
+                fs.existsSync(credsPath) &&
+                !whatsappService.isConnected(s.id) &&
+                !whatsappService.getQr(s.id) &&
+                s.status !== 'CONNECTING'
+            ) {
+                console.log(`[Watchdog] Auto-reconnecting saved session: ${s.id}`);
+                whatsappService.connect(s.id, (id, status, detail, qr) => {
+                    Session.updateStatus(id, status, detail);
+                    broadcastToClients({
+                        type: 'session-update',
+                        data: { sessionId: id, status, detail, qr }
+                    });
+                    dispatchSessionWebhook(id, status, detail);
+                }, (id, msg) => {
+                    dispatchMessageWebhook(id, msg);
+                });
+            }
         }
     } catch (err) {
         console.error('[Scheduler] check error:', err.message);
@@ -712,7 +740,10 @@ if (typeof schedulerInterval.unref === 'function') schedulerInterval.unref();
     const defaultAdminPassword = (!rawAdminPass || isPlaceholderPass) ? 'admin123' : rawAdminPass;
     await User.ensureAdmin(defaultAdminPassword, defaultAdminEmail);
 
-    // Sync sessions from disk to DB
+    // 1. Restore saved WhatsApp sessions & auth_info_baileys credentials from Cloud Backup before scanning disk
+    await cloudSessionStore.restoreFromCloud();
+
+    // 2. Sync sessions from disk to DB
     Session.syncWithFilesystem();
 
     const existingSessions = Session.getAll();
@@ -724,13 +755,13 @@ if (typeof schedulerInterval.unref === 'function') schedulerInterval.unref();
             sessionTokens.set(session.id, session.token);
         }
 
-        // Re-initialize any session that was previously connected, disconnected, or stuck in connecting
-        const statusesToReinit = ['CONNECTED', 'DISCONNECTED', 'CONNECTING', 'INITIALIZING'];
-        if (statusesToReinit.includes(session.status)) {
-            console.log(`[SYSTEM] Re-initializing session: ${session.id} (last status: ${session.status})`);
+        // Only auto-connect sessions that have valid creds.json or were previously active
+        const credsPath = path.join(whatsappService.AUTH_DIR, session.id, 'creds.json');
+        const statusesToReinit = ['CONNECTED', 'DISCONNECTED', 'CONNECTING', 'INITIALIZING', 'CREATING'];
+        if (fs.existsSync(credsPath) || statusesToReinit.includes(session.status)) {
+            console.log(`[SYSTEM] Re-initializing session: ${session.id} (last status: ${session.status}, hasCreds: ${fs.existsSync(credsPath)})`);
 
-            // Reset status to DISCONNECTED briefly to ensure a clean slate for Baileys
-            Session.updateStatus(session.id, 'DISCONNECTED', 'Restarting...');
+            Session.updateStatus(session.id, 'CONNECTING', 'Restoring session...');
 
             whatsappService.connect(session.id, (id, status, detail, qr) => {
                 Session.updateStatus(id, status, detail);
@@ -753,17 +784,18 @@ server.listen(PORT, () => {
     console.log(`[SYSTEM] Admin dashboard: http://localhost:${PORT}/admin/dashboard.html`);
 });
 
-// Graceful shutdown
+// Graceful shutdown (handles both SIGTERM on Render/Cloud Run and SIGINT locally)
 let isShuttingDown = false;
-process.on('SIGINT', () => {
+async function handleGracefulShutdown(signal) {
     if (isShuttingDown) return;
     isShuttingDown = true;
+    whatsappService.setShuttingDown(true);
 
-    console.log('\n[SYSTEM] Shutting down...');
+    console.log(`\n[SYSTEM] Received ${signal}, shutting down gracefully...`);
 
     clearInterval(schedulerInterval);
 
-    // Disconnect all WhatsApp sessions first
+    // 1. Disconnect all WhatsApp sessions immediately so a new rolling-deploy container never hits 440 conflict
     for (const [sessionId] of whatsappService.getActiveSessions()) {
         try {
             whatsappService.disconnect(sessionId);
@@ -772,16 +804,23 @@ process.on('SIGINT', () => {
         }
     }
 
-    // Close WebSocket server
+    // 2. Flush latest session credentials to cloud backup
+    try {
+        await Promise.race([
+            cloudSessionStore.backupToCloudNow('shutdown'),
+            new Promise(r => setTimeout(r, 4000))
+        ]);
+    } catch (_) {}
+
+    // 3. Close WebSocket server
     wss.close(() => {
         console.log('[SYSTEM] WebSocket server closed');
     });
 
-    // Close HTTP server
+    // 4. Close HTTP server
     server.close(() => {
         console.log('[SYSTEM] HTTP server closed');
 
-        // Close database connection last
         try {
             db.close();
             console.log('[SYSTEM] Database connection closed');
@@ -792,12 +831,15 @@ process.on('SIGINT', () => {
         process.exit(0);
     });
 
-    // Force exit after 10 seconds if graceful shutdown fails
+    // Force exit after 8 seconds if graceful shutdown hangs
     setTimeout(() => {
         console.error('[SYSTEM] Force exiting after timeout...');
         process.exit(1);
-    }, 10000);
-});
+    }, 8000);
+}
+
+process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
 
 // Process resilience guards against intermittent Baileys/network disconnects
 process.on('uncaughtException', (err) => {

@@ -713,9 +713,17 @@
                 <section id="session-management" class="mb-5">
                     <div class="card shadow-sm">
                         <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                            <h5 class="mb-0"><i class="bi bi-device-hdd text-primary me-2"></i>Session Management</h5>
                             <div class="d-flex align-items-center gap-2">
-                                <input type="text" id="sessionIdInput" class="form-control" placeholder="Create New Session ID" style="max-width: 250px;">
+                                <h5 class="mb-0"><i class="bi bi-device-hdd text-primary me-2"></i>Session Management</h5>
+                                <span class="badge bg-success-subtle text-success border border-success-subtle small" title="WhatsApp credentials and tokens are automatically backed up to Google Sheet WA_Config across server restarts">
+                                    <i class="bi bi-cloud-check-fill me-1"></i>Auto Cloud Save Active
+                                </span>
+                            </div>
+                            <div class="d-flex flex-wrap align-items-center gap-2">
+                                <button type="button" class="btn btn-outline-success btn-sm" onclick="backupSessionToCloud(this)" title="Manually force-save current WhatsApp session credentials to Cloud Backup now">
+                                    <i class="bi bi-cloud-arrow-up-fill me-1"></i>Save Session Now
+                                </button>
+                                <input type="text" id="sessionIdInput" class="form-control" placeholder="Create New Session ID" style="max-width: 220px;">
                                 <button id="createSessionBtn" class="btn btn-primary"><i class="bi bi-plus-lg me-1"></i>Create</button>
                             </div>
                         </div>
@@ -2442,6 +2450,46 @@
                 alert(`An error occurred while creating session: ${error.message}`);
             }
         });
+
+        async function backupSessionToCloud(btn = null) {
+            let origHtml = '';
+            if (btn) {
+                origHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Saving...`;
+            }
+            try {
+                const res = await fetch('/api/v1/sessions/backup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin'
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'success') {
+                    if (btn) {
+                        btn.innerHTML = `<i class="bi bi-check-circle-fill me-1"></i>Session Saved!`;
+                        btn.classList.replace('btn-outline-success', 'btn-success');
+                        setTimeout(() => {
+                            btn.disabled = false;
+                            btn.classList.replace('btn-success', 'btn-outline-success');
+                            btn.innerHTML = origHtml;
+                        }, 2500);
+                    }
+                } else {
+                    alert(data.message || 'Could not back up session yet. Make sure a WhatsApp session is connected first.');
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = origHtml;
+                    }
+                }
+            } catch (err) {
+                alert(`Cloud backup error: ${err.message}`);
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+            }
+        }
 
         function initializeWebSocket() {
             fetch('/admin/ws-token')

@@ -1411,6 +1411,43 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         }
     });
 
+    // Cloud Session Backup & Restore endpoints (persists auth_info_baileys across Render restarts)
+    router.post('/sessions/backup', async (req, res) => {
+        try {
+            const cloudSessionStore = require('../services/cloudSessionStore');
+            const result = await cloudSessionStore.backupToCloudNow('manual');
+            if (result.ok) {
+                log('Cloud session backup saved', 'SYSTEM', result);
+                return res.status(200).json({
+                    status: 'success',
+                    message: 'WhatsApp session credentials backed up to Cloud (WA_Config) successfully!',
+                    data: result
+                });
+            }
+            return res.status(400).json({
+                status: 'error',
+                message: result.reason || result.error || 'Cloud backup skipped or failed',
+                data: result
+            });
+        } catch (error) {
+            res.status(500).json({ status: 'error', message: error.message });
+        }
+    });
+
+    router.post('/sessions/restore', async (req, res) => {
+        try {
+            const cloudSessionStore = require('../services/cloudSessionStore');
+            const result = await cloudSessionStore.restoreFromCloud();
+            return res.status(200).json({
+                status: 'success',
+                message: `Restored ${result.restored || 0} session(s) from Cloud backup.`,
+                data: result
+            });
+        } catch (error) {
+            res.status(500).json({ status: 'error', message: error.message });
+        }
+    });
+
     async function sendMessage(sock, to, message, sessionId = null) {
         try {
             const jid = to.endsWith('@newsletter') || to.endsWith('@g.us') ? to : jidNormalizedUser(to);

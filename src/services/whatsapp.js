@@ -33,6 +33,7 @@ const path = require('path');
 const fs = require('fs');
 const Session = require('../models/Session');
 const ActivityLog = require('../models/ActivityLog');
+const cloudSessionStore = require('./cloudSessionStore');
 
 // Logger configuration
 const defaultLogLevel = process.env.NODE_ENV === 'production' ? 'silent' : 'warn';
@@ -45,6 +46,11 @@ const retryCounters = new Map();
 const reconnectTimeouts = new Map();
 // Maps client messageId (3EB0...) <-> newsletter server_id (e.g. "104")
 const newsletterServerIdMap = new Map();
+let isServerShuttingDown = false;
+
+function setShuttingDown(val) {
+    isServerShuttingDown = Boolean(val);
+}
 
 // Per-session connect mutex: serializes connect() calls for the same session so
 // two overlapping connects cannot both create a socket (double-connect / stale
@@ -128,6 +134,15 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
 
+    // Wrap state.keys.set so Signal key updates also trigger debounced cloud backup
+    if (state && state.keys && typeof state.keys.set === 'function') {
+        const origKeysSet = state.keys.set.bind(state.keys);
+        state.keys.set = async (data) => {
+            await origKeysSet(data);
+            cloudSessionStore.scheduleBackup(`keys-update:${sessionId}`, 4000);
+        };
+    }
+
     // Get latest WA version (with fallback)
     let version;
     try {
@@ -181,8 +196,11 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
         return sock;
     }
 
-    // Handle credentials update
-    sock.ev.on('creds.update', saveCreds);
+    // Handle credentials update + cloud persistence
+    sock.ev.on('creds.update', async () => {
+        await saveCreds();
+        cloudSessionStore.scheduleBackup(`creds-update:${sessionId}`, 2000);
+    });
 
     // Handle connection updates
     sock.ev.on('connection.update', async (update) => {
@@ -211,9 +229,17 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
             const name = sock.user?.name || 'Unknown';
             Session.updateStatus(sessionId, 'CONNECTED', `Connected as ${name}`);
             if (onUpdate) onUpdate(sessionId, 'CONNECTED', `Connected as ${name}`, null);
+
+            // Persist authenticated session to cloud immediately upon connection open
+            cloudSessionStore.scheduleBackup(`connection-open:${sessionId}`, 800);
         }
 
         if (connection === 'close') {
+            if (isServerShuttingDown) {
+                activeSockets.delete(sessionId);
+                return;
+            }
+
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const reason = lastDisconnect?.error?.output?.payload?.message || 'Connection closed';
 
@@ -221,36 +247,46 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
             Session.updateStatus(sessionId, 'DISCONNECTED', reason);
             if (onUpdate) onUpdate(sessionId, 'DISCONNECTED', reason, null);
 
-            // Handle reconnection logic
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut &&
-                statusCode !== DisconnectReason.connectionReplaced &&
-                statusCode !== 401 &&
-                statusCode !== 403 &&
-                statusCode !== 440;
+            // Only treat explicit device unlink (loggedOut / 401 / 403) as permanent logout
+            const isExplicitLogout =
+                statusCode === DisconnectReason.loggedOut ||
+                statusCode === 401 ||
+                statusCode === 403;
 
-            if (shouldReconnect) {
+            const isConflictReplaced =
+                statusCode === DisconnectReason.connectionReplaced ||
+                statusCode === 440;
+
+            if (!isExplicitLogout) {
                 const retryCount = (retryCounters.get(sessionId) || 0) + 1;
                 retryCounters.set(sessionId, retryCount);
 
-                if (retryCount <= 5) {
-                    console.log(`[${sessionId}] Reconnecting... (attempt ${retryCount})`);
+                const maxRetries = isConflictReplaced ? 8 : 25;
+                // On 440 (rolling deploy container handover), wait 8s so the old container finishes SIGTERM exit
+                const delayMs = isConflictReplaced
+                    ? 8000
+                    : Math.min(3000 * Math.min(retryCount, 5), 15000);
+
+                if (retryCount <= maxRetries) {
+                    console.log(`[${sessionId}] Reconnecting in ${delayMs}ms... (attempt ${retryCount}/${maxRetries}, code: ${statusCode})`);
                     const timerId = setTimeout(() => {
                         reconnectTimeouts.delete(sessionId);
-                        connect(sessionId, onUpdate, onMessage);
-                    }, 5000);
+                        if (!isServerShuttingDown) {
+                            connect(sessionId, onUpdate, onMessage);
+                        }
+                    }, delayMs);
                     reconnectTimeouts.set(sessionId, timerId);
                 } else {
-                    console.log(`[${sessionId}] Max retries reached`);
+                    console.log(`[${sessionId}] Max retries reached (${maxRetries})`);
                     retryCounters.delete(sessionId);
                 }
             } else {
-                // Clear session data on logout
-                if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    console.log(`[${sessionId}] Logged out, cleaning session data`);
-                    if (fs.existsSync(sessionDir)) {
-                        fs.rmSync(sessionDir, { recursive: true, force: true });
-                    }
+                // Clear session data only when user explicitly unlinked device on phone (401 / loggedOut)
+                console.log(`[${sessionId}] Explicitly logged out from phone (${statusCode}), cleaning session data`);
+                if (fs.existsSync(sessionDir)) {
+                    fs.rmSync(sessionDir, { recursive: true, force: true });
                 }
+                cloudSessionStore.scheduleBackup('session-deleted', 1000);
             }
 
             activeSockets.delete(sessionId);
@@ -580,6 +616,7 @@ function deleteSessionData(sessionId) {
     }
 
     Session.delete(sessionId);
+    cloudSessionStore.scheduleBackup('session-deleted', 500);
 }
 
 /**
@@ -960,6 +997,7 @@ function getNewsletterServerId(msgId) {
 module.exports = {
     connect,
     disconnect,
+    setShuttingDown,
     getSocket,
     getQr,
     isConnected,

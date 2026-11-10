@@ -21,6 +21,12 @@ class ChatMessage {
         `);
 
         stmt.run(msgId, sessionId, remoteJid, senderName || null, fromMe ? 1 : 0, messageType, body, mediaUrl, fromMe ? 1 : 0);
+        if (fromMe) {
+            try {
+                const cloudSessionStore = require('../services/cloudSessionStore');
+                cloudSessionStore.scheduleBackup('chat-message-saved', 5000);
+            } catch (_) {}
+        }
         return this.findById(msgId);
     }
 
