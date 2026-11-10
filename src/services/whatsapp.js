@@ -704,7 +704,7 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
 
             try {
                 const sharp = require('sharp');
-                // 1. High-definition 800px JPEG for Big Image Preview card (clean white background)
+                // 1. High-definition 800px JPEG for Channel Big Image Preview card
                 hqBuffer = await sharp(rawImgBuffer)
                     .flatten({ background: { r: 255, g: 255, b: 255 } })
                     .resize({ width: 800, height: 800, fit: 'inside', withoutEnlargement: true })
@@ -715,18 +715,19 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
                 thumbDimensions.width = hqMeta.width || 800;
                 thumbDimensions.height = hqMeta.height || 800;
 
-                // 2. Inline thumbnail < 80KB for instant mobile display
+                // 2. Compact inline thumbnail (< 25KB) for native WhatsApp chat link preview
+                // WhatsApp E2EE routing server drops messages if inline thumbnail is oversized
                 inlineThumb = await sharp(rawImgBuffer)
                     .flatten({ background: { r: 255, g: 255, b: 255 } })
-                    .resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: true })
-                    .jpeg({ quality: 80, progressive: false })
+                    .resize({ width: 320, height: 320, fit: 'inside', withoutEnlargement: true })
+                    .jpeg({ quality: 75, progressive: false })
                     .toBuffer();
 
-                if (inlineThumb.length > 80000) {
+                if (inlineThumb.length > 30000) {
                     inlineThumb = await sharp(rawImgBuffer)
                         .flatten({ background: { r: 255, g: 255, b: 255 } })
-                        .resize({ width: 550, height: 550, fit: 'inside', withoutEnlargement: true })
-                        .jpeg({ quality: 75, progressive: false })
+                        .resize({ width: 240, height: 240, fit: 'inside', withoutEnlargement: true })
+                        .jpeg({ quality: 65, progressive: false })
                         .toBuffer();
                 }
 
@@ -743,7 +744,7 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
             if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && (hqBuffer || inlineThumb)) {
                 try {
                     const { imageMessage } = await prepareWAMessageMedia(
-                        { image: hqBuffer || inlineThumb },
+                        { image: isChannel ? (hqBuffer || inlineThumb) : inlineThumb },
                         {
                             upload: sock.waUploadToServer,
                             mediaTypeOverride: 'thumbnail-link',
@@ -769,23 +770,11 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
                 }
             }
 
-            // externalAdReply is for personal and group chats; channels render from highQualityThumbnail + jpegThumbnail
-            if (!isChannel) {
-                const cardTitle = urlInfo.title || urlParamTitle || 'Munna Grocery';
-                const cardBody = urlInfo.description || (urlParamSp ? `₹${urlParamSp} (MRP ₹${urlParamMrp || urlParamSp})` : '');
-                messageData.contextInfo = {
-                    externalAdReply: {
-                        title: cardTitle,
-                        body: cardBody,
-                        mediaType: 1, // IMAGE
-                        thumbnailUrl: imgUrl,
-                        thumbnail: inlineThumb || hqBuffer,
-                        sourceUrl: matchedUrl,
-                        renderLargerThumbnail: true,
-                        showAdAttribution: false
-                    }
-                };
-            }
+            // NOTE: Do NOT attach contextInfo.externalAdReply!
+            // WhatsApp's E2EE anti-spam filters silently DROP or refuse to deliver messages with
+            // externalAdReply sent from non-business personal accounts to individual chats (stays at 1 tick forever).
+            // Native WhatsApp link preview (extendedTextMessage with title, description, & jpegThumbnail)
+            // is 100% accepted and delivered instantly with double ticks to all individual chats and groups.
         } catch (imgErr) {
             console.warn(`[WhatsApp] Thumbnail download/upload failed for ${imgUrl}: ${imgErr.message}`);
             delete urlInfo.highQualityThumbnail;
