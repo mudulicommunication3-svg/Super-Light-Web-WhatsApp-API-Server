@@ -292,6 +292,10 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
         let messageType = 'text';
         let mediaUrl = null;
 
+        if (msg.message.protocolMessage) {
+            return;
+        }
+
         if (msg.message.conversation) {
             textBody = msg.message.conversation;
         } else if (msg.message.extendedTextMessage?.text) {

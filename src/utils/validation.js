@@ -38,19 +38,19 @@ const isValidPhoneNumber = (number) => {
 
     const trimmed = number.trim();
 
-    // Allow WhatsApp channel invite links
-    if (trimmed.includes('whatsapp.com/channel/')) {
+    // Allow WhatsApp channel invite links and group invite links
+    if (trimmed.includes('whatsapp.com/channel/') || trimmed.includes('chat.whatsapp.com/')) {
         return true;
     }
 
     // Allow WhatsApp JID formats: individual (@s.whatsapp.net), group (@g.us), and channel (@newsletter)
     if (trimmed.endsWith('@s.whatsapp.net') || trimmed.endsWith('@g.us') || trimmed.endsWith('@newsletter')) {
         const phonePart = trimmed.split('@')[0];
-        // Groups/Channels can be numeric (120363...) or alphanumeric invite tokens
-        return /^[a-zA-Z0-9_-]{5,40}$/.test(phonePart);
+        // Groups/Channels can be numeric (120363...), hyphenated (919937...-1620...), or alphanumeric invite tokens
+        return /^[a-zA-Z0-9_.-]{5,60}$/.test(phonePart);
     }
 
-    // Allow bare invite codes (e.g. 0029Vb4qABC)
+    // Allow bare invite codes (e.g. 0029Vb4qABC or Lb0HDuHr54i15vtL8TyIHi)
     if (/^[a-zA-Z0-9_-]{14,40}$/.test(trimmed) && !/^\d+$/.test(trimmed)) {
         return true;
     }

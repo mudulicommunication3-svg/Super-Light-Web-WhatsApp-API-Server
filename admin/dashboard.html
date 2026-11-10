@@ -897,16 +897,16 @@
 
                                                 <div class="col-md-6 mb-3">
                                                     <label for="edit-recipient" class="form-label fw-bold">
-                                                        Recipient / Channel ID or Link <span class="text-danger">*</span>
+                                                        Recipient (Group Link/JID, Channel Link/JID, or Phone) <span class="text-danger">*</span>
                                                     </label>
                                                     <div class="input-group">
                                                         <span class="input-group-text bg-body-tertiary"><i class="bi bi-broadcast"></i></span>
-                                                        <input type="text" class="form-control font-monospace" id="edit-recipient" placeholder="Channel link, 120363...@newsletter, or phone" oninput="updateApiUsage()">
-                                                        <button class="btn btn-outline-primary" type="button" onclick="fetchChannelPostsForEdit(this)" title="Fetch recent posts from this Channel to find Message ID & Server ID">
+                                                        <input type="text" class="form-control font-monospace" id="edit-recipient" placeholder="Group link (chat.whatsapp.com/...), Channel link, or phone" oninput="updateApiUsage()">
+                                                        <button class="btn btn-outline-primary" type="button" onclick="fetchChannelPostsForEdit(this)" title="Fetch recent messages from this Group, Channel, or Chat to find Message ID">
                                                             <i class="bi bi-search me-1"></i> Find IDs
                                                         </button>
                                                     </div>
-                                                    <div class="form-text">Paste Channel Link (<code>https://whatsapp.com/channel/...</code>) & click <strong>Find IDs</strong> to see all posts & IDs.</div>
+                                                    <div class="form-text">Paste Group Link (<code>https://chat.whatsapp.com/...</code>), Channel Link, or Phone & click <strong>Find IDs</strong> to see all sent messages & IDs.</div>
                                                 </div>
                                             </div>
 
@@ -1557,10 +1557,12 @@
             const sessionData = sessionsData.get(sessionId);
             const currentToken = sessionData ? sessionData.token : '';
 
+            const isGroupOrChannelTarget = (r) => r.includes('@g.us') || /chat\.whatsapp\.com\//i.test(r) || r.includes('@newsletter') || /whatsapp\.com\/channel\//i.test(r);
+
             if (activeTab === 'text-tab') {
                 const message = document.getElementById('text-message').value;
                 payload = {
-                    recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
+                    recipient_type: isGroupOrChannelTarget(recipient) ? 'group' : 'individual',
                     to: recipient,
                     type: 'text',
                     text: { body: message }
@@ -1578,7 +1580,7 @@
                 const caption = document.getElementById('image-caption').value;
                 const imageUrl = document.getElementById('image-url').value;
                 payload = {
-                    recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
+                    recipient_type: isGroupOrChannelTarget(recipient) ? 'group' : 'individual',
                     to: recipient,
                     type: 'image',
                     image: { link: imageUrl, caption: caption }
@@ -1589,7 +1591,7 @@
             } else if (activeTab === 'document-tab') {
                 const docUrl = document.getElementById('document-url').value;
                 payload = {
-                    recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
+                    recipient_type: isGroupOrChannelTarget(recipient) ? 'group' : 'individual',
                     to: recipient,
                     type: 'document',
                     document: { link: docUrl, mimetype: 'application/pdf' }
@@ -1601,7 +1603,7 @@
                 const payloads = [];
                 const textMessage = document.getElementById('combo-text-message').value || 'Hello!';
                 payloads.push({
-                    recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
+                    recipient_type: isGroupOrChannelTarget(recipient) ? 'group' : 'individual',
                     to: recipient,
                     type: 'text',
                     text: { body: textMessage }
@@ -1609,7 +1611,7 @@
                 const imageCaption = document.getElementById('combo-image-caption').value || 'Caption';
                 const imageUrl = document.getElementById('combo-image-url').value || 'https://picsum.photos/200';
                 payloads.push({
-                    recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
+                    recipient_type: isGroupOrChannelTarget(recipient) ? 'group' : 'individual',
                     to: recipient,
                     type: 'image',
                     image: { link: imageUrl, caption: imageCaption }
@@ -1617,7 +1619,7 @@
                 const docUrl = document.getElementById('combo-document-url').value || 'https://example.com/doc.pdf';
                 const docFilename = document.getElementById('combo-document-filename').value || 'doc.pdf';
                 payloads.push({
-                    recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
+                    recipient_type: isGroupOrChannelTarget(recipient) ? 'group' : 'individual',
                     to: recipient,
                     type: 'document',
                     document: { link: docUrl, mimetype: 'application/pdf', filename: docFilename }
@@ -1703,8 +1705,9 @@
                 alert('Recipient and message are required.');
                 return;
             }
+            const isGroupOrChannel = recipient.includes('@g.us') || /chat\.whatsapp\.com\//i.test(recipient) || recipient.includes('@newsletter') || /whatsapp\.com\/channel\//i.test(recipient);
             const payload = {
-                recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
+                recipient_type: isGroupOrChannel ? 'group' : 'individual',
                 to: recipient,
                 type: 'text',
                 text: { body: message }
@@ -1889,8 +1892,9 @@
                 imagePayload.link = imageUrl;
             }
 
+            const isGroupOrChannel = recipient.includes('@g.us') || /chat\.whatsapp\.com\//i.test(recipient) || recipient.includes('@newsletter') || /whatsapp\.com\/channel\//i.test(recipient);
             const payload = {
-                recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
+                recipient_type: isGroupOrChannel ? 'group' : 'individual',
                 to: recipient,
                 type: 'image',
                 image: { ...imagePayload, caption }
@@ -1917,8 +1921,9 @@
                 docPayload.mimetype = 'application/pdf';
             }
 
+            const isGroupOrChannel = recipient.includes('@g.us') || /chat\.whatsapp\.com\//i.test(recipient) || recipient.includes('@newsletter') || /whatsapp\.com\/channel\//i.test(recipient);
             const payload = {
-                recipient_type: recipient.includes('@g.us') ? 'group' : 'individual',
+                recipient_type: isGroupOrChannel ? 'group' : 'individual',
                 to: recipient,
                 type: 'document',
                 document: { ...docPayload }
@@ -1930,10 +1935,11 @@
             const recipient = apiRecipientInput.value;
             if (!recipient) { alert('Recipient is required.'); return; }
             const payloads = [];
+            const rType = (recipient.includes('@g.us') || /chat\.whatsapp\.com\//i.test(recipient) || recipient.includes('@newsletter') || /whatsapp\.com\/channel\//i.test(recipient)) ? 'group' : 'individual';
 
             const textMessage = document.getElementById('combo-text-message').value;
             if (textMessage) {
-                payloads.push({ recipient_type: recipient.includes('@g.us') ? 'group' : 'individual', to: recipient, type: 'text', text: { body: textMessage } });
+                payloads.push({ recipient_type: rType, to: recipient, type: 'text', text: { body: textMessage } });
             }
 
             const imageCaption = document.getElementById('combo-image-caption').value;
@@ -1949,7 +1955,7 @@
                     imagePayload.link = imageUrl;
                 }
                 if (imagePayload.id || imagePayload.link) {
-                    payloads.push({ recipient_type: recipient.includes('@g.us') ? 'group' : 'individual', to: recipient, type: 'image', image: { ...imagePayload, caption: imageCaption } });
+                    payloads.push({ recipient_type: rType, to: recipient, type: 'image', image: { ...imagePayload, caption: imageCaption } });
                 }
             }
 
@@ -1972,7 +1978,7 @@
                     if (docFilename) docPayload.filename = docFilename;
                 }
                 if (docPayload.id || docPayload.link) {
-                    payloads.push({ recipient_type: recipient.includes('@g.us') ? 'group' : 'individual', to: recipient, type: 'document', document: { ...docPayload } });
+                    payloads.push({ recipient_type: rType, to: recipient, type: 'document', document: { ...docPayload } });
                 }
             }
 

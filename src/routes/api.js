@@ -1534,6 +1534,20 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
             to = String(to).trim();
 
+            // Auto-detect and resolve WhatsApp Group Invite Link (https://chat.whatsapp.com/...)
+            const groupLinkMatch = to.match(/chat\.whatsapp\.com\/(?:invite\/)?([a-zA-Z0-9_-]+)/i);
+            if (groupLinkMatch) {
+                const groupInviteCode = groupLinkMatch[1];
+                const resolvedGroupJid = await resolveGroupInviteCode(session.sock, groupInviteCode, sessionId);
+                if (resolvedGroupJid) {
+                    to = resolvedGroupJid;
+                    recipient_type = 'group';
+                } else {
+                    results.push({ status: 'error', message: `Could not resolve WhatsApp group invite link (${to}). Please check that the invite link is valid or use the group JID (@g.us).` });
+                    continue;
+                }
+            }
+
             // Auto-detect and resolve WhatsApp channel (invite URL, bare invite code, or alphanumeric@newsletter)
             let channelInviteCode = null;
             const channelLinkMatch = to.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
@@ -1544,8 +1558,13 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                 if (!/^\d{16,25}$/.test(prefix)) {
                     channelInviteCode = prefix;
                 }
-            } else if (/^[a-zA-Z0-9_-]{14,40}$/.test(to) && !/^\d+$/.test(to)) {
-                channelInviteCode = to;
+            } else if (!to.endsWith('@g.us') && /^[a-zA-Z0-9_-]{14,40}$/.test(to) && !/^\d+$/.test(to)) {
+                if (recipient_type === 'group') {
+                    const resolvedGroupJid = await resolveGroupInviteCode(session.sock, to, sessionId);
+                    if (resolvedGroupJid) to = resolvedGroupJid;
+                } else {
+                    channelInviteCode = to;
+                }
             }
 
             if (channelInviteCode) {
@@ -1569,12 +1588,12 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                 }
             } else if (/^\d{16,25}$/.test(to) && (recipient_type === 'channel' || recipient_type === 'newsletter')) {
                 to = `${to}@newsletter`;
-            } else if (/^\d{16,25}$/.test(to) && recipient_type === 'group') {
+            } else if (/^[\d-]{10,35}$/.test(to) && recipient_type === 'group') {
                 to = `${to}@g.us`;
             }
 
             if (!isValidPhoneNumber(to)) {
-                results.push({ status: 'error', message: `Invalid recipient format (${to}). Use E.164 phone, group JID (@g.us), channel link, or channel JID (@newsletter).` });
+                results.push({ status: 'error', message: `Invalid recipient format (${to}). Use E.164 phone, group link/JID (@g.us), channel link, or channel JID (@newsletter).` });
                 continue;
             }
 
@@ -1720,10 +1739,56 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
     });
 
     const channelInviteCache = new Map();
+    const groupInviteCache = new Map();
 
-    // Helper to resolve any recipient (invite link, bare invite code, numeric JID, or phone)
+    // Helper to resolve WhatsApp group invite code (e.g. from https://chat.whatsapp.com/Lb0HDuHr54i15vtL8TyIHi)
+    // Automatically queries invite info and accepts the invite if the bot is not yet in the group.
+    async function resolveGroupInviteCode(sock, groupInviteCode, sessionId = 'SYSTEM') {
+        if (!groupInviteCode) return null;
+        if (groupInviteCache.has(groupInviteCode)) {
+            return groupInviteCache.get(groupInviteCode);
+        }
+        let resolvedJid = null;
+        if (sock && typeof sock.groupGetInviteInfo === 'function') {
+            try {
+                const info = await Promise.race([
+                    sock.groupGetInviteInfo(groupInviteCode),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('groupGetInviteInfo timeout')), 5000))
+                ]);
+                if (info && info.id) {
+                    resolvedJid = info.id.endsWith('@g.us') ? info.id : `${info.id}@g.us`;
+                }
+            } catch (_) {}
+        }
+        if (sock && typeof sock.groupAcceptInvite === 'function') {
+            try {
+                const acceptedJid = await Promise.race([
+                    sock.groupAcceptInvite(groupInviteCode),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('groupAcceptInvite timeout')), 5000))
+                ]);
+                if (acceptedJid && !resolvedJid) {
+                    resolvedJid = acceptedJid.endsWith('@g.us') ? acceptedJid : `${acceptedJid}@g.us`;
+                }
+            } catch (_) {}
+        }
+        if (resolvedJid) {
+            groupInviteCache.set(groupInviteCode, resolvedJid);
+            log('Group resolved from invite code to JID', sessionId, { inviteCode: groupInviteCode, jid: resolvedJid });
+        }
+        return resolvedJid;
+    }
+
+    // Helper to resolve any recipient (group invite link, channel invite link, bare invite code, numeric JID, or phone)
     async function resolveTargetJid(session, rawTarget) {
         let dest = String(rawTarget || '').trim();
+
+        const groupLinkMatch = dest.match(/chat\.whatsapp\.com\/(?:invite\/)?([a-zA-Z0-9_-]+)/i);
+        if (groupLinkMatch) {
+            const groupInviteCode = groupLinkMatch[1];
+            const resolvedGroupJid = await resolveGroupInviteCode(session?.sock, groupInviteCode);
+            if (resolvedGroupJid) return resolvedGroupJid;
+        }
+
         let channelInviteCode = null;
         const channelLinkMatch = dest.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
         if (channelLinkMatch) {
@@ -1764,12 +1829,12 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         return jidNormalizedUser(dest.includes('@') ? dest : `${dest.replace(/^\+/, '')}@s.whatsapp.net`);
     }
 
-    // Helper to list recent channel posts & IDs (first from fast local SQLite cache, then optional 1.5s bounded IQ query)
+    // Helper to list recent channel/group/chat posts & IDs (first from fast local SQLite cache, then optional 1.5s bounded IQ query for channels)
     async function fetchNewsletterPostsWithIds(sock, channelJid, count = 40) {
         const postsMap = new Map();
         const { getNewsletterServerId } = require('../services/whatsapp');
 
-        // 1. Instant local SQLite lookup of messages sent to this channel
+        // 1. Instant local SQLite lookup of messages sent to this channel/group/chat
         try {
             const { db } = require('../config/database');
             const rows = db.prepare(`
@@ -1792,8 +1857,8 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             }
         } catch (_) {}
 
-        // 2. Non-blocking 1500ms time-bounded IQ fallback (never hangs if WhatsApp ignores legacy IQ)
-        if (sock && typeof sock.newsletterFetchMessages === 'function') {
+        // 2. Non-blocking 1500ms time-bounded IQ fallback for newsletters only
+        if (channelJid.endsWith('@newsletter') && sock && typeof sock.newsletterFetchMessages === 'function') {
             try {
                 const iqResult = await Promise.race([
                     sock.newsletterFetchMessages(channelJid, count),
@@ -2068,13 +2133,34 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             let resolvedServerId = null;
             let editModeUsed = 'in-place';
 
+            const isNewsletter = destination.endsWith('@newsletter');
+
+            if (!isNewsletter) {
+                try {
+                    const { db } = require('../config/database');
+                    const directRow = db.prepare('SELECT id FROM chat_messages WHERE remote_jid = ? AND id = ? LIMIT 1').get(destination, String(messageId));
+                    if (!directRow && updateText) {
+                        const itemMatch = String(updateText).match(/[?&]item=([^&#_\s]+)/i);
+                        if (itemMatch && itemMatch[1]) {
+                            const byItem = db.prepare(`
+                                SELECT id FROM chat_messages
+                                WHERE remote_jid = ? AND (body LIKE ? OR body LIKE ?)
+                                ORDER BY timestamp ASC LIMIT 1
+                            `).get(destination, `%item=${itemMatch[1]}_%`, `%item=${itemMatch[1]}&%`);
+                            if (byItem && byItem.id) {
+                                messageId = String(byItem.id);
+                                finalMessageId = messageId;
+                            }
+                        }
+                    }
+                } catch (_) {}
+            }
+
             const editKey = {
                 remoteJid: destination,
                 fromMe: true,
                 id: messageId
             };
-
-            const isNewsletter = destination.endsWith('@newsletter');
 
             if (isNewsletter) {
                 const { clientMsgId, serverId } = await resolveNewsletterPostIds(session.sock, destination, messageId, updateText);
@@ -2144,7 +2230,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                     ...textPayload,
                     edit: editKey
                 });
-                finalMessageId = result?.key?.id || messageId;
+                finalMessageId = editKey.id;
                 editModeUsed = 'in-place (forced)';
             } else {
                 // Auto mode: attempt in-place edit first (supported on 1-on-1 chats and groups)
@@ -2153,7 +2239,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                         ...textPayload,
                         edit: editKey
                     });
-                    finalMessageId = result?.key?.id || messageId;
+                    finalMessageId = editKey.id;
                     editModeUsed = 'in-place';
                 } catch (editErr) {
                     console.warn(`[WhatsApp] In-place edit failed (${editErr.message}), falling back to delete-and-repost...`);
