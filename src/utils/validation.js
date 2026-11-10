@@ -36,14 +36,27 @@ const sanitizeId = (text) => {
 const isValidPhoneNumber = (number) => {
     if (!number || typeof number !== 'string') return false;
 
+    const trimmed = number.trim();
+
+    // Allow WhatsApp channel invite links
+    if (trimmed.includes('whatsapp.com/channel/')) {
+        return true;
+    }
+
     // Allow WhatsApp JID formats: individual (@s.whatsapp.net), group (@g.us), and channel (@newsletter)
-    if (number.endsWith('@s.whatsapp.net') || number.endsWith('@g.us') || number.endsWith('@newsletter')) {
-        const phonePart = number.split('@')[0];
-        return /^\d{5,30}$/.test(phonePart);
+    if (trimmed.endsWith('@s.whatsapp.net') || trimmed.endsWith('@g.us') || trimmed.endsWith('@newsletter')) {
+        const phonePart = trimmed.split('@')[0];
+        // Groups/Channels can be numeric (120363...) or alphanumeric invite tokens
+        return /^[a-zA-Z0-9_-]{5,40}$/.test(phonePart);
+    }
+
+    // Allow bare invite codes (e.g. 0029Vb4qABC)
+    if (/^[a-zA-Z0-9_-]{14,40}$/.test(trimmed) && !/^\d+$/.test(trimmed)) {
+        return true;
     }
 
     // Strip + prefix if present for validation
-    const cleaned = number.startsWith('+') ? number.slice(1) : number;
+    const cleaned = trimmed.startsWith('+') ? trimmed.slice(1) : trimmed;
 
     // E.164: 1-15 digits after country code, only numbers allowed
     return /^\d{8,15}$/.test(cleaned);
