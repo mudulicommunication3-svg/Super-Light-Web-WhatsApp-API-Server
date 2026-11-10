@@ -1413,14 +1413,30 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
     async function sendMessage(sock, to, message) {
         try {
-            const jid = jidNormalizedUser(to);
+            const jid = to.endsWith('@newsletter') || to.endsWith('@g.us') ? to : jidNormalizedUser(to);
             let payload = message;
             if (message && typeof message.text === 'string') {
                 const { buildTextMessageWithPreview } = require('../services/whatsapp');
                 payload = await buildTextMessageWithPreview(message.text, sock, jid);
             }
             const result = await sock.sendMessage(jid, payload);
-            return { status: 'success', message: `Message sent to ${to}`, messageId: result.key.id };
+            const msgId = result?.key?.id;
+            let serverId = result?.key?.server_id || null;
+            if (jid.endsWith('@newsletter') && !serverId) {
+                try {
+                    const posts = await fetchNewsletterPostsWithIds(sock, jid, 5);
+                    const matched = posts.find(p => p.messageId === msgId) || posts[posts.length - 1];
+                    if (matched && matched.serverId) {
+                        serverId = matched.serverId;
+                    }
+                } catch (_) {}
+            }
+            return {
+                status: 'success',
+                message: `Message sent to ${to}`,
+                messageId: msgId,
+                ...(serverId ? { serverId } : {})
+            };
         } catch (error) {
             console.error(`Failed to send message to ${to}:`, error);
             return { status: 'error', message: `Failed to send message to ${to}. Reason: ${error.message}` };
@@ -1715,6 +1731,91 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         return jidNormalizedUser(dest.includes('@') ? dest : `${dest.replace(/^\+/, '')}@s.whatsapp.net`);
     }
 
+    // Helper to recursively extract <message> nodes from newsletterFetchMessages IQ result
+    async function fetchNewsletterPostsWithIds(sock, channelJid, count = 40) {
+        const posts = [];
+        if (!sock || typeof sock.newsletterFetchMessages !== 'function') {
+            return posts;
+        }
+        try {
+            const iqResult = await sock.newsletterFetchMessages(channelJid, count);
+            const { proto } = require('@whiskeysockets/baileys');
+
+            const walkNodes = (node) => {
+                if (!node || typeof node !== 'object') return;
+                if (node.tag === 'message' && node.attrs) {
+                    const serverId = node.attrs.server_id || null;
+                    const msgId = node.attrs.id || node.attrs.message_id || serverId || null;
+                    const timestamp = node.attrs.t ? Number(node.attrs.t) : null;
+                    let text = '';
+                    let title = '';
+                    if (Array.isArray(node.content)) {
+                        const ptNode = node.content.find(c => c && c.tag === 'plaintext');
+                        if (ptNode && ptNode.content) {
+                            try {
+                                const buf = typeof ptNode.content === 'string'
+                                    ? Buffer.from(ptNode.content, 'binary')
+                                    : Buffer.from(ptNode.content);
+                                const decoded = proto.Message.decode(buf);
+                                text = decoded?.extendedTextMessage?.text ||
+                                       decoded?.conversation ||
+                                       decoded?.imageMessage?.caption ||
+                                       decoded?.videoMessage?.caption || '';
+                                title = decoded?.extendedTextMessage?.title || '';
+                            } catch (_) {}
+                        }
+                    }
+                    posts.push({ messageId: msgId, serverId, timestamp, text, title });
+                }
+                if (Array.isArray(node.content)) {
+                    for (const child of node.content) {
+                        walkNodes(child);
+                    }
+                }
+            };
+            walkNodes(iqResult);
+        } catch (err) {
+            console.warn(`[WhatsApp] fetchNewsletterPostsWithIds error for ${channelJid}: ${err.message}`);
+        }
+        return posts;
+    }
+
+    // Helper to resolve both original client messageId (3EB0...) and server_id (e.g. 104)
+    // Supports raw messageId ("3EB0..."), numeric server_id ("104"), or full channel post URL ("https://whatsapp.com/channel/.../104")
+    async function resolveNewsletterPostIds(sock, channelJid, rawInputId, optionalUpdateText = '') {
+        let cleanInput = String(rawInputId || '').trim();
+        // If user pasted a full WhatsApp Channel post link like https://whatsapp.com/channel/0029.../104
+        const postUrlMatch = cleanInput.match(/whatsapp\.com\/channel\/[a-zA-Z0-9_-]+\/(\d+)/i);
+        if (postUrlMatch && postUrlMatch[1]) {
+            cleanInput = postUrlMatch[1];
+        }
+
+        let clientMsgId = cleanInput;
+        let serverId = /^\d+$/.test(cleanInput) ? cleanInput : null;
+
+        const posts = await fetchNewsletterPostsWithIds(sock, channelJid, 50);
+        if (posts.length > 0) {
+            let matched = posts.find(p =>
+                (p.messageId && String(p.messageId) === cleanInput) ||
+                (p.serverId && String(p.serverId) === cleanInput)
+            );
+            // If not matched by ID directly, try matching by product EAN in text
+            if (!matched && optionalUpdateText) {
+                const eanMatch = String(optionalUpdateText).match(/[?&]item=([^&#_]+)/i);
+                if (eanMatch && eanMatch[1]) {
+                    const baseEan = decodeURIComponent(eanMatch[1]).trim();
+                    matched = posts.find(p => p.text && p.text.includes(baseEan));
+                }
+            }
+            if (matched) {
+                if (matched.messageId) clientMsgId = String(matched.messageId);
+                if (matched.serverId) serverId = String(matched.serverId);
+            }
+        }
+
+        return { clientMsgId, serverId };
+    }
+
     // Delete Message Endpoint: DELETE /api/message and DELETE /api/v1/message
     const handleDeleteMessage = async (req, res) => {
         log('API request', 'SYSTEM', { event: 'api-request', method: req.method, endpoint: req.originalUrl, body: req.body });
@@ -1734,6 +1835,25 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
         try {
             const destination = await resolveTargetJid(session, target);
+
+            if (destination.endsWith('@newsletter')) {
+                const { clientMsgId, serverId } = await resolveNewsletterPostIds(session.sock, destination, messageId);
+                // WhatsApp Newsletter Admin Revoke uses edit="8" (EditAttributeAdminRevoke) with original message id and empty plaintext
+                await session.sock.relayMessage(destination, {}, {
+                    messageId: clientMsgId,
+                    additionalAttributes: {
+                        edit: '8',
+                        ...(serverId ? { server_id: String(serverId) } : {})
+                    }
+                });
+                log('Channel post deleted (edit=8)', clientMsgId, { event: 'channel-message-deleted', messageId: clientMsgId, serverId, sessionId, destination });
+                return res.status(200).json({
+                    status: 'success',
+                    message: `Channel post ${clientMsgId} (server_id: ${serverId || 'N/A'}) deleted successfully.`,
+                    messageId: clientMsgId,
+                    serverId
+                });
+            }
 
             await session.sock.sendMessage(destination, { delete: { remoteJid: destination, fromMe: true, id: messageId } });
 
@@ -1776,6 +1896,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
             let result;
             let finalMessageId = messageId;
+            let resolvedServerId = null;
             let editModeUsed = 'in-place';
 
             const editKey = {
@@ -1786,65 +1907,78 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
             const isNewsletter = destination.endsWith('@newsletter');
 
-            if (isNewsletter && editMode !== 'replace') {
-                // In WhatsApp Channels (@newsletter), messages are identified on WhatsApp server by sequential server_id.
-                // We first attempt the native WhatsApp Web Protocol newsletter edit stanza (edit="1" with server_id).
-                let channelEditSuccess = false;
-                let targetServerId = String(messageId);
+            if (isNewsletter) {
+                const { clientMsgId, serverId } = await resolveNewsletterPostIds(session.sock, destination, messageId, updateText);
+                resolvedServerId = serverId;
 
-                try {
-                    // If messageId is a client hash (e.g. 3EB0...), attempt to resolve its server_id via newsletterFetchMessages
-                    if (session.sock.newsletterFetchMessages && !/^\d+$/.test(targetServerId)) {
-                        try {
-                            const updates = await session.sock.newsletterFetchMessages(destination, 50);
-                            const { getAllBinaryNodeChildren } = require('@whiskeysockets/baileys');
-                            const children = getAllBinaryNodeChildren(updates);
-                            for (const ch of children) {
-                                if (ch.attrs && (ch.attrs.message_id === messageId || ch.attrs.id === messageId || ch.attrs.server_id === messageId)) {
-                                    targetServerId = ch.attrs.server_id || ch.attrs.message_id;
-                                    log('Resolved channel server_id for edit', messageId, { targetServerId, destination });
-                                    break;
-                                }
-                            }
-                        } catch (fErr) {
-                            console.warn(`[WhatsApp] Resolving newsletter server_id: ${fErr.message}`);
-                        }
-                    }
-
-                    const { generateWAMessage } = require('@whiskeysockets/baileys');
-                    const fullMsg = await generateWAMessage(destination, textPayload, { userJid: session.sock.user?.id });
-
-                    const newEditMsgId = session.sock.generateMessageTag ? session.sock.generateMessageTag() : `ED_${Date.now()}`;
-                    await session.sock.relayMessage(destination, fullMsg.message, {
-                        messageId: newEditMsgId,
-                        additionalAttributes: {
-                            edit: '1',
-                            server_id: String(targetServerId)
-                        }
-                    });
-
-                    channelEditSuccess = true;
-                    finalMessageId = messageId;
-                    editModeUsed = 'newsletter-in-place-edit';
-                    log('Native newsletter in-place edit stanza delivered', messageId, { destination, serverId: targetServerId, editMsgId: newEditMsgId });
-                } catch (nlEditErr) {
-                    console.warn(`[WhatsApp] Native newsletter edit rejected by WhatsApp server (${nlEditErr.message}). Falling back to channel broadcast:`, nlEditErr);
-                }
-
-                if (!channelEditSuccess) {
-                    // Fallback: Delete old post (if allowed) and broadcast updated post
+                if (editMode === 'replace') {
+                    // Explicit Admin Revoke (edit="8") + Repost
                     try {
-                        await session.sock.sendMessage(destination, { delete: editKey });
-                    } catch (_) {}
+                        await session.sock.relayMessage(destination, {}, {
+                            messageId: clientMsgId,
+                            additionalAttributes: {
+                                edit: '8',
+                                ...(serverId ? { server_id: String(serverId) } : {})
+                            }
+                        });
+                        log('Old channel post deleted via edit=8 before repost', clientMsgId, { event: 'channel-message-deleted', clientMsgId, serverId, sessionId, destination });
+                    } catch (delErr) {
+                        console.warn(`[WhatsApp] Deleting old channel post ${clientMsgId} failed: ${delErr.message}`);
+                    }
                     result = await session.sock.sendMessage(destination, textPayload);
-                    finalMessageId = result?.key?.id || messageId;
-                    editModeUsed = 'channel-repost (server-fallback)';
+                    finalMessageId = result?.key?.id || clientMsgId;
+                    editModeUsed = 'replace (channel-delete-and-repost)';
+                } else {
+                    // Native WhatsApp Newsletter Admin Edit Protocol (matches whatsmeow sendNewsletter):
+                    // 1. stanza.attrs.id MUST be the original messageId (clientMsgId)
+                    // 2. stanza.attrs.edit MUST be "3" (EditAttributeAdminEdit)
+                    // 3. <plaintext> MUST contain the unwrapped extendedTextMessage (NOT ProtocolMessage)
+                    try {
+                        const { generateWAMessage } = require('@whiskeysockets/baileys');
+                        const fullMsg = await generateWAMessage(destination, textPayload, {
+                            userJid: session.sock.user?.id,
+                            messageId: clientMsgId
+                        });
+                        if (fullMsg.message && fullMsg.message.messageContextInfo) {
+                            delete fullMsg.message.messageContextInfo;
+                        }
+
+                        await session.sock.relayMessage(destination, fullMsg.message, {
+                            messageId: clientMsgId,
+                            additionalAttributes: {
+                                edit: '3',
+                                ...(serverId ? { server_id: String(serverId) } : {})
+                            }
+                        });
+
+                        finalMessageId = clientMsgId;
+                        editModeUsed = 'newsletter-admin-edit (edit=3)';
+                        result = { key: { remoteJid: destination, fromMe: true, id: clientMsgId }, serverId };
+                        log('Native newsletter admin edit (edit=3) delivered', clientMsgId, { destination, clientMsgId, serverId });
+                    } catch (nlEditErr) {
+                        console.warn(`[WhatsApp] Newsletter admin edit (edit=3) failed (${nlEditErr.message}), falling back to replace:`, nlEditErr);
+                        if (editMode === 'force_edit') {
+                            throw nlEditErr;
+                        }
+                        try {
+                            await session.sock.relayMessage(destination, {}, {
+                                messageId: clientMsgId,
+                                additionalAttributes: {
+                                    edit: '8',
+                                    ...(serverId ? { server_id: String(serverId) } : {})
+                                }
+                            });
+                        } catch (_) {}
+                        result = await session.sock.sendMessage(destination, textPayload);
+                        finalMessageId = result?.key?.id || clientMsgId;
+                        editModeUsed = 'channel-repost (fallback)';
+                    }
                 }
             } else if (editMode === 'replace') {
-                // Explicit delete and repost
+                // Explicit delete and repost for 1:1 / group chat
                 try {
                     await session.sock.sendMessage(destination, { delete: editKey });
-                    log('Old message deleted before repost', messageId, { event: 'channel-message-deleted', messageId, sessionId, destination });
+                    log('Old message deleted before repost', messageId, { event: 'message-deleted', messageId, sessionId, destination });
                 } catch (delErr) {
                     console.warn(`[WhatsApp] Deleting old message ${messageId} failed: ${delErr.message}`);
                 }
@@ -1892,13 +2026,14 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                 });
             } catch (_) {}
 
-            log('Message updated', finalMessageId, { event: 'message-updated', oldMessageId: messageId, messageId: finalMessageId, mode: editModeUsed, sessionId, destination });
+            log('Message updated', finalMessageId, { event: 'message-updated', oldMessageId: messageId, messageId: finalMessageId, serverId: resolvedServerId, mode: editModeUsed, sessionId, destination });
             res.status(200).json({
                 status: 'success',
                 mode: editModeUsed,
                 message: `Message updated successfully via ${editModeUsed} (old: ${messageId}, new: ${finalMessageId})`,
                 messageId: finalMessageId,
                 oldMessageId: messageId,
+                serverId: resolvedServerId,
                 data: result
             });
         } catch (error) {
@@ -1910,6 +2045,32 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
     router.put('/message', handleEditMessage);
     router.put('/v1/message', handleEditMessage);
+
+    // Fetch Recent Channel Posts & Server IDs: GET /api/v1/channels/messages?sessionId=...&channel=...
+    router.get('/channels/messages', async (req, res) => {
+        const { sessionId, channel, url, count } = req.query;
+        const target = channel || url;
+        if (!sessionId || !target) {
+            return res.status(400).json({ status: 'error', message: 'sessionId and channel (or url) query parameters are required.' });
+        }
+        const session = sessions.get(sessionId);
+        if (!session || !session.sock || session.status !== 'CONNECTED') {
+            return res.status(404).json({ status: 'error', message: `Session ${sessionId} not found or not connected.` });
+        }
+        try {
+            const destination = await resolveTargetJid(session, target);
+            const limit = Math.min(Math.max(parseInt(String(count || '25'), 10) || 25, 1), 100);
+            const posts = await fetchNewsletterPostsWithIds(session.sock, destination, limit);
+            res.status(200).json({
+                status: 'success',
+                channelJid: destination,
+                count: posts.length,
+                data: posts
+            });
+        } catch (error) {
+            res.status(500).json({ status: 'error', message: `Failed to fetch channel messages: ${error.message}` });
+        }
+    });
 
     // Group Scraper Endpoint: GET /api/v1/sessions/:id/groups
     router.get('/sessions/:id/groups', async (req, res) => {

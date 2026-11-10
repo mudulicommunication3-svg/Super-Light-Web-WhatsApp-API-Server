@@ -886,13 +886,13 @@
                                             <div class="row g-3">
                                                 <div class="col-md-6 mb-3">
                                                     <label for="edit-message-id" class="form-label fw-bold">
-                                                        Old Message ID <span class="text-danger">*</span>
+                                                        Old Message ID / Channel Server ID <span class="text-danger">*</span>
                                                     </label>
                                                     <div class="input-group">
                                                         <span class="input-group-text bg-body-tertiary"><i class="bi bi-key"></i></span>
-                                                        <input type="text" class="form-control font-monospace" id="edit-message-id" placeholder="e.g. 3EB08F149623E0E1B95879" oninput="updateApiUsage()">
+                                                        <input type="text" class="form-control font-monospace" id="edit-message-id" placeholder="e.g. 3EB08F149623E0E1B95879 or Server ID 104" oninput="updateApiUsage()">
                                                     </div>
-                                                    <div class="form-text">The WhatsApp message ID returned when the post was first created.</div>
+                                                    <div class="form-text">Enter <code>messageId</code> (<code>3EB0...</code>), Channel <code>server_id</code> (<code>104</code>), or Post Link (<code>.../channel/.../104</code>).</div>
                                                 </div>
 
                                                 <div class="col-md-6 mb-3">
@@ -902,10 +902,15 @@
                                                     <div class="input-group">
                                                         <span class="input-group-text bg-body-tertiary"><i class="bi bi-broadcast"></i></span>
                                                         <input type="text" class="form-control font-monospace" id="edit-recipient" placeholder="Channel link, 120363...@newsletter, or phone" oninput="updateApiUsage()">
+                                                        <button class="btn btn-outline-primary" type="button" onclick="fetchChannelPostsForEdit(this)" title="Fetch recent posts from this Channel to find Message ID & Server ID">
+                                                            <i class="bi bi-search me-1"></i> Find IDs
+                                                        </button>
                                                     </div>
-                                                    <div class="form-text">Paste the Channel Link (<code>https://whatsapp.com/channel/...</code>) or JID.</div>
+                                                    <div class="form-text">Paste Channel Link (<code>https://whatsapp.com/channel/...</code>) & click <strong>Find IDs</strong> to see all posts & IDs.</div>
                                                 </div>
                                             </div>
+
+                                            <div id="channel-posts-finder" class="mb-3 d-none"></div>
 
                                             <div class="mb-3">
                                                 <label for="edit-new-text" class="form-label fw-bold">
@@ -2151,10 +2156,118 @@
             const idInput = document.getElementById('edit-message-id');
             const recInput = document.getElementById('edit-recipient');
             const txtInput = document.getElementById('edit-new-text');
+            const finderDiv = document.getElementById('channel-posts-finder');
             if (idInput) idInput.value = '';
             if (recInput) recInput.value = '';
             if (txtInput) txtInput.value = '';
+            if (finderDiv) {
+                finderDiv.classList.add('d-none');
+                finderDiv.innerHTML = '';
+            }
             updateApiUsage();
+        }
+
+        function selectChannelPostForEdit(msgId, srvId, postText) {
+            const idInput = document.getElementById('edit-message-id');
+            const txtInput = document.getElementById('edit-new-text');
+            if (idInput) {
+                idInput.value = msgId || srvId || '';
+            }
+            if (txtInput && !txtInput.value.trim() && postText) {
+                txtInput.value = postText;
+            }
+            updateApiUsage();
+            idInput?.focus();
+        }
+
+        async function fetchChannelPostsForEdit(btn = null) {
+            const sessionId = apiSessionIdSelect.value;
+            const recipient = document.getElementById('edit-recipient')?.value.trim();
+            const finderDiv = document.getElementById('channel-posts-finder');
+            if (!sessionId) {
+                alert('Please select an active session first.');
+                return;
+            }
+            if (!recipient) {
+                alert('Please enter the Channel Link (e.g. https://whatsapp.com/channel/...) or Channel JID first.');
+                document.getElementById('edit-recipient')?.focus();
+                return;
+            }
+            const sessionData = sessionsData.get(sessionId);
+            const currentToken = sessionData ? sessionData.token : '';
+            let origHtml = '';
+            if (btn) {
+                origHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+            }
+            if (finderDiv) {
+                finderDiv.classList.remove('d-none');
+                finderDiv.innerHTML = `<div class="p-3 bg-body-tertiary border rounded small text-muted"><span class="spinner-border spinner-border-sm me-2 text-primary"></span>Fetching recent Channel posts, Message IDs & Server IDs...</div>`;
+            }
+            try {
+                const res = await fetch(`/api/v1/channels/messages?sessionId=${encodeURIComponent(sessionId)}&channel=${encodeURIComponent(recipient)}&count=25`, {
+                    headers: { 'Authorization': `Bearer ${currentToken}` }
+                });
+                const json = await res.json();
+                if (!res.ok || json.status !== 'success') {
+                    throw new Error(json.message || 'Failed to fetch channel posts');
+                }
+                const posts = Array.isArray(json.data) ? json.data.slice().reverse() : [];
+                if (posts.length === 0) {
+                    finderDiv.innerHTML = `<div class="alert alert-info py-2 mb-0 small"><i class="bi bi-info-circle me-1"></i>No recent posts found in channel (<code>${sanitize(json.channelJid || recipient)}</code>).</div>`;
+                } else {
+                    const rowsHtml = posts.map(p => {
+                        const mId = sanitize(String(p.messageId || ''));
+                        const sId = sanitize(String(p.serverId || ''));
+                        const rawTxt = String(p.text || p.title || '(Media / No text)');
+                        const shortTxt = sanitize(rawTxt.length > 90 ? rawTxt.substring(0, 90) + '...' : rawTxt);
+                        const safeJsText = JSON.stringify(String(p.text || '')).replace(/"/g, '&quot;');
+                        return `
+                            <tr>
+                                <td class="font-monospace small fw-bold text-primary">${sId || '-'}</td>
+                                <td class="font-monospace small">${mId || '-'}</td>
+                                <td class="small text-truncate" style="max-width: 280px;" title="${sanitize(rawTxt)}">${shortTxt}</td>
+                                <td class="text-end">
+                                    <button type="button" class="btn btn-sm btn-warning fw-semibold py-0 px-2" onclick="selectChannelPostForEdit('${mId}', '${sId}', ${safeJsText})">
+                                        Use ID
+                                    </button>
+                                </td>
+                            </tr>
+                        `;
+                    }).join('');
+                    finderDiv.innerHTML = `
+                        <div class="card border-primary-subtle shadow-sm">
+                            <div class="card-header bg-primary-subtle py-2 d-flex justify-content-between align-items-center">
+                                <span class="small fw-bold text-primary-emphasis"><i class="bi bi-list-ul me-1"></i>Recent Channel Posts (${posts.length}) — Click "Use ID" to auto-fill</span>
+                                <button type="button" class="btn-close btn-sm" onclick="document.getElementById('channel-posts-finder').classList.add('d-none')"></button>
+                            </div>
+                            <div class="table-responsive" style="max-height: 240px; overflow-y: auto;">
+                                <table class="table table-sm table-hover align-middle mb-0">
+                                    <thead class="table-light sticky-top">
+                                        <tr>
+                                            <th>Server ID</th>
+                                            <th>Message ID (<code>id</code>)</th>
+                                            <th>Post Text / Link</th>
+                                            <th class="text-end">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>${rowsHtml}</tbody>
+                                </table>
+                            </div>
+                        </div>
+                    `;
+                }
+            } catch (err) {
+                if (finderDiv) {
+                    finderDiv.innerHTML = `<div class="alert alert-danger py-2 mb-0 small"><i class="bi bi-exclamation-triangle me-1"></i>${sanitize(err.message)}</div>`;
+                }
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+            }
         }
 
         async function loadSessions() {
