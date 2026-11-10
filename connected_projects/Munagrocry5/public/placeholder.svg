@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c2340"/>
+      <stop offset="100%" stop-color="#1864ab"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="64" fill="url(#bgGrad)"/>
+  <circle cx="256" cy="220" r="110" fill="#ffffff" fill-opacity="0.1"/>
+  <path d="M180 190 L332 190 L310 320 C306 342 288 358 266 358 L246 358 C224 358 206 342 202 320 Z" fill="url(#accentGrad)"/>
+  <path d="M210 190 L210 160 C210 135 230 115 256 115 C282 115 302 135 302 160 L302 190" stroke="#ffd43b" stroke-width="18" stroke-linecap="round" fill="none"/>
+  <circle cx="236" cy="255" r="8" fill="#ffffff"/>
+  <circle cx="276" cy="255" r="8" fill="#ffffff"/>
+  <path d="M236 285 Q256 305 276 285" stroke="#ffffff" stroke-width="6" stroke-linecap="round" fill="none"/>
+  <text x="256" y="420" font-family="'Plus Jakarta Sans', Arial, sans-serif" font-size="34" font-weight="900" fill="#ffffff" text-anchor="middle" letter-spacing="1">MUNNA STORE</text>
+  <text x="256" y="456" font-family="'Noto Sans Oriya', Arial, sans-serif" font-size="22" font-weight="700" fill="#ffd43b" text-anchor="middle">ମୁନ୍ନା ମୋବାଇଲ୍ ଓ ଗ୍ରୋସରୀ · ନିଆଳି</text>
+</svg>

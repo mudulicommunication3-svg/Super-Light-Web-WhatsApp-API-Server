@@ -746,8 +746,8 @@ if (typeof schedulerInterval.unref === 'function') schedulerInterval.unref();
     }
 })();
 
-// Start server
-const PORT = process.env.PORT || 3000;
+// Start server (Port 3000 required by AI Studio runtime environment)
+const PORT = 3000;
 server.listen(PORT, () => {
     console.log(`[SYSTEM] Server is running on port ${PORT}`);
     console.log(`[SYSTEM] Admin dashboard: http://localhost:${PORT}/admin/dashboard.html`);

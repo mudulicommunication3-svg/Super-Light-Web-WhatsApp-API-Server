@@ -1,0 +1,7 @@
+tasks.register('assembleDebug', Exec) {
+    commandLine 'npm', 'run', 'build'
+}
+
+tasks.register('build') {
+    dependsOn 'assembleDebug'
+}

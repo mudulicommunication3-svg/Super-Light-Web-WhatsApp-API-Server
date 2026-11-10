@@ -8,7 +8,7 @@
     "lint": "node --check index.js && node --check create-admin.js && node --check src/models/User.js && node --check src/config/database.js",
     "seed:admin": "node create-admin.js",
     "start": "node -r dotenv/config index.js",
-    "dev": "nodemon index.js",
+    "dev": "nodemon",
     "test": "jest",
     "start-production": "npm run start:prod",
     "start:prod:unix": "bash start-production.sh",

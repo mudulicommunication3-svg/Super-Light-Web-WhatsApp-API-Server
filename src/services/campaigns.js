@@ -501,7 +501,13 @@ class CampaignManager {
                 else if (status === 'pending') campaign.statistics.pending++;
             }
         }
-        if (recipients.length) this.saveCampaign(campaign);
+        if (recipients.length) {
+            try {
+                const Recipient = require('../models/Recipient');
+                Recipient.updateStatus(campaignId, recipientNumber, status, error);
+            } catch (_) {}
+            this.saveCampaign(campaign);
+        }
     }
 
     // Update campaign status

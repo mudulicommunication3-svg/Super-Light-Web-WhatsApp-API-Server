@@ -1,0 +1,23 @@
+import { CapacitorConfig } from '@capacitor/cli';
+
+const config: CapacitorConfig = {
+  appId: 'in.munagrocery.app',
+  appName: 'Munna Grocery',
+  webDir: 'dist',
+  server: {
+    androidScheme: 'https',
+    cleartext: true,
+    allowNavigation: [
+      'munagrocry5.pages.dev',
+      'script.google.com',
+      'script.googleusercontent.com'
+    ]
+  },
+  android: {
+    allowMixedContent: true,
+    captureInput: true,
+    webContentsDebuggingEnabled: false
+  }
+};
+
+export default config;
