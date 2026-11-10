@@ -1752,9 +1752,10 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
     // Edit Message Endpoint: PUT /api/message and PUT /api/v1/message
     const handleEditMessage = async (req, res) => {
         log('API request', 'SYSTEM', { event: 'api-request', method: req.method, endpoint: req.originalUrl, body: req.body });
-        let { sessionId, messageId, remoteJid, to, text, newText, forceReplace } = req.body;
+        let { sessionId, messageId, remoteJid, to, text, newText, forceReplace, mode } = req.body;
         const target = remoteJid || to;
         const updateText = text || newText;
+        const editMode = mode || (forceReplace ? 'replace' : 'auto');
 
         if (!sessionId || !messageId || !target || !updateText) {
             log('API error', 'SYSTEM', { event: 'api-error', error: 'sessionId, messageId, remoteJid (or to), and text (or newText) are required.', endpoint: req.originalUrl });
@@ -1773,55 +1774,52 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             const { buildTextMessageWithPreview } = require('../services/whatsapp');
             const textPayload = await buildTextMessageWithPreview(updateText, session.sock, destination);
 
-            const isChannel = destination.endsWith('@newsletter');
             let result;
             let finalMessageId = messageId;
+            let editModeUsed = 'in-place';
 
-            if (isChannel || forceReplace) {
-                // WhatsApp Channels (@newsletter) do NOT support in-place signal edits.
-                // Replace pattern: delete previous post and post the new link message.
+            const editKey = {
+                remoteJid: destination,
+                fromMe: true,
+                id: messageId
+            };
+
+            if (editMode === 'replace') {
+                // Explicit delete and repost
                 try {
-                    await session.sock.sendMessage(destination, {
-                        delete: {
-                            remoteJid: destination,
-                            fromMe: true,
-                            id: messageId
-                        }
-                    });
-                    log('Channel old message deleted', messageId, { event: 'channel-message-deleted', messageId, sessionId, destination });
+                    await session.sock.sendMessage(destination, { delete: editKey });
+                    log('Old message deleted before repost', messageId, { event: 'channel-message-deleted', messageId, sessionId, destination });
                 } catch (delErr) {
-                    console.warn(`[WhatsApp] Deleting old channel message ${messageId} failed: ${delErr.message}`);
+                    console.warn(`[WhatsApp] Deleting old message ${messageId} failed: ${delErr.message}`);
                 }
-
                 result = await session.sock.sendMessage(destination, textPayload);
                 finalMessageId = result?.key?.id || messageId;
+                editModeUsed = 'replace (delete-and-repost)';
+            } else if (editMode === 'force_edit') {
+                // Force pure protocol MESSAGE_EDIT
+                result = await session.sock.sendMessage(destination, {
+                    ...textPayload,
+                    edit: editKey
+                });
+                finalMessageId = result?.key?.id || messageId;
+                editModeUsed = 'in-place (forced)';
             } else {
-                // Standard personal or group chat: attempt in-place edit
+                // Auto mode: attempt in-place edit first
                 try {
-                    const editKey = {
-                        remoteJid: destination,
-                        fromMe: true,
-                        id: messageId
-                    };
-
                     result = await session.sock.sendMessage(destination, {
                         ...textPayload,
                         edit: editKey
                     });
                     finalMessageId = result?.key?.id || messageId;
+                    editModeUsed = 'in-place';
                 } catch (editErr) {
-                    console.warn(`[WhatsApp] Direct edit failed (${editErr.message}), falling back to delete-and-repost...`);
+                    console.warn(`[WhatsApp] In-place edit failed (${editErr.message}), falling back to delete-and-repost...`);
                     try {
-                        await session.sock.sendMessage(destination, {
-                            delete: {
-                                remoteJid: destination,
-                                fromMe: true,
-                                id: messageId
-                            }
-                        });
+                        await session.sock.sendMessage(destination, { delete: editKey });
                     } catch (_) {}
                     result = await session.sock.sendMessage(destination, textPayload);
                     finalMessageId = result?.key?.id || messageId;
+                    editModeUsed = 'fallback-replace';
                 }
             }
 
@@ -1838,10 +1836,11 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                 });
             } catch (_) {}
 
-            log('Message updated', finalMessageId, { event: 'message-updated', oldMessageId: messageId, messageId: finalMessageId, sessionId, destination });
+            log('Message updated', finalMessageId, { event: 'message-updated', oldMessageId: messageId, messageId: finalMessageId, mode: editModeUsed, sessionId, destination });
             res.status(200).json({
                 status: 'success',
-                message: `Message updated successfully (old: ${messageId}, new: ${finalMessageId})`,
+                mode: editModeUsed,
+                message: `Message updated successfully via ${editModeUsed} (old: ${messageId}, new: ${finalMessageId})`,
                 messageId: finalMessageId,
                 oldMessageId: messageId,
                 data: result

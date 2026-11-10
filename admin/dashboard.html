@@ -650,6 +650,10 @@
                         <i class="bi bi-broadcast"></i>
                         <span>Channel Poster</span>
                     </a>
+                    <a href="#api-control" class="sidebar-link" onclick="openEditMessageTab();">
+                        <i class="bi bi-pencil-square text-warning"></i>
+                        <span>Edit Old Message</span>
+                    </a>
                     <a href="#api-reference" class="sidebar-link">
                         <i class="bi bi-code-slash"></i>
                         <span>cURL Examples</span>
@@ -758,6 +762,9 @@
                                         <li class="nav-item" role="presentation">
                                             <button class="nav-link text-primary fw-semibold" id="channel-tab" data-bs-toggle="tab" data-bs-target="#channel-panel" type="button" role="tab"><i class="bi bi-broadcast me-1"></i> Channel Poster</button>
                                         </li>
+                                        <li class="nav-item" role="presentation">
+                                            <button class="nav-link text-warning fw-semibold" id="edit-tab" data-bs-toggle="tab" data-bs-target="#edit-panel" type="button" role="tab"><i class="bi bi-pencil-square me-1"></i> Edit Old Message</button>
+                                        </li>
                                     </ul>
                                     <div class="tab-content" id="api-tab-content">
                                         <!-- Text Panel -->
@@ -865,6 +872,87 @@
                                                 </button>
                                             </div>
                                         </div>
+
+                                        <!-- Edit Old Message Panel -->
+                                        <div class="tab-pane fade" id="edit-panel" role="tabpanel">
+                                            <div class="alert alert-warning bg-warning-subtle border-warning-subtle d-flex align-items-center mb-3">
+                                                <i class="bi bi-pencil-square fs-3 text-warning me-3"></i>
+                                                <div>
+                                                    <div class="fw-bold">Edit or Replace an Existing WhatsApp Message / Channel Post</div>
+                                                    <div class="small text-muted">Test manual editing of an existing WhatsApp message by its ID. You can test in-place editing, deleting, or replace (delete & repost) directly on WhatsApp!</div>
+                                                </div>
+                                            </div>
+
+                                            <div class="row g-3">
+                                                <div class="col-md-6 mb-3">
+                                                    <label for="edit-message-id" class="form-label fw-bold">
+                                                        Old Message ID <span class="text-danger">*</span>
+                                                    </label>
+                                                    <div class="input-group">
+                                                        <span class="input-group-text bg-body-tertiary"><i class="bi bi-key"></i></span>
+                                                        <input type="text" class="form-control font-monospace" id="edit-message-id" placeholder="e.g. 3EB08F149623E0E1B95879" oninput="updateApiUsage()">
+                                                    </div>
+                                                    <div class="form-text">The WhatsApp message ID returned when the post was first created.</div>
+                                                </div>
+
+                                                <div class="col-md-6 mb-3">
+                                                    <label for="edit-recipient" class="form-label fw-bold">
+                                                        Recipient / Channel ID or Link <span class="text-danger">*</span>
+                                                    </label>
+                                                    <div class="input-group">
+                                                        <span class="input-group-text bg-body-tertiary"><i class="bi bi-broadcast"></i></span>
+                                                        <input type="text" class="form-control font-monospace" id="edit-recipient" placeholder="Channel link, 120363...@newsletter, or phone" oninput="updateApiUsage()">
+                                                    </div>
+                                                    <div class="form-text">Paste the Channel Link (<code>https://whatsapp.com/channel/...</code>) or JID.</div>
+                                                </div>
+                                            </div>
+
+                                            <div class="mb-3">
+                                                <label for="edit-new-text" class="form-label fw-bold">
+                                                    New Product Link / Updated Message Text <span class="text-danger">*</span>
+                                                </label>
+                                                <textarea class="form-control" id="edit-new-text" rows="4" placeholder="Paste updated product URL or new text message...&#10;e.g. https://www.munagrocery.in/?item=491417435_s15_rst_52pgj&n=Fortune%20Atta&sp=220&mrp=270&stk=15" oninput="updateApiUsage()"></textarea>
+                                                <div class="form-text">
+                                                    <i class="bi bi-link-45deg text-primary"></i> Product links automatically fetch high-definition photo previews and card titles.
+                                                </div>
+                                            </div>
+
+                                            <div class="mb-3">
+                                                <label class="form-label fw-bold">Edit Mode</label>
+                                                <div class="d-flex flex-wrap gap-3">
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="radio" name="editModeRadio" id="edit-mode-auto" value="auto" checked onchange="updateApiUsage()">
+                                                        <label class="form-check-label" for="edit-mode-auto">
+                                                            <strong>Auto (Recommended)</strong> <span class="text-muted small">- In-place edit first, with fallback</span>
+                                                        </label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="radio" name="editModeRadio" id="edit-mode-force-edit" value="force_edit" onchange="updateApiUsage()">
+                                                        <label class="form-check-label" for="edit-mode-force-edit">
+                                                            <strong>Force In-Place Edit</strong> <span class="text-muted small">- Protocol edit only</span>
+                                                        </label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="radio" name="editModeRadio" id="edit-mode-replace" value="replace" onchange="updateApiUsage()">
+                                                        <label class="form-check-label" for="edit-mode-replace">
+                                                            <strong>Delete & Repost (Replace)</strong> <span class="text-muted small">- Deletes old message & posts new</span>
+                                                        </label>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div class="d-flex flex-wrap gap-2">
+                                                <button class="btn btn-warning px-4 py-2 text-dark fw-bold" onclick="sendEditMessage(this)" id="btn-edit-message">
+                                                    <i class="bi bi-pencil-square me-1"></i> Edit Message Now
+                                                </button>
+                                                <button class="btn btn-outline-danger px-3 py-2" onclick="sendDeleteMessage(this)" id="btn-delete-old-message" title="Test deleting only the old message">
+                                                    <i class="bi bi-trash3 me-1"></i> Delete Old Message Only
+                                                </button>
+                                                <button class="btn btn-outline-secondary px-3 py-2" type="button" onclick="clearEditFields()">
+                                                    <i class="bi bi-eraser me-1"></i> Clear
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -907,6 +995,9 @@
                                 </li>
                                 <li class="nav-item" role="presentation">
                                     <button class="nav-link" id="curl-channel-tab" data-bs-toggle="tab" data-bs-target="#curl-channel" type="button" role="tab"><i class="bi bi-broadcast me-1"></i> WhatsApp Channel</button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="curl-edit-tab" data-bs-toggle="tab" data-bs-target="#curl-edit" type="button" role="tab"><i class="bi bi-pencil-square me-1"></i> Edit Message (PUT)</button>
                                 </li>
                             </ul>
                             <div class="tab-content" id="curlExampleTabsContent">
@@ -1007,6 +1098,34 @@
   }
 ]'</code></pre>
                                         <button class="btn btn-sm btn-outline-secondary mb-2" onclick="copyCurl('curl-send-channel', this)">Copy</button>
+                                    </div>
+                                </div>
+                                <div class="tab-pane fade" id="curl-edit" role="tabpanel">
+                                    <div class="mb-3">
+                                        <strong>Edit Existing Message / Channel Post (PUT /api/v1/message)</strong>
+                                        <pre><code id="curl-edit-message">curl -X PUT "http://localhost:3000/api/v1/message" \
+-H "Authorization: Bearer YOUR_TOKEN" \
+-H "Content-Type: application/json" \
+-d '{
+  "sessionId": "YOUR_SESSION_ID",
+  "messageId": "3EB08F149623E0E1B95879",
+  "to": "https://whatsapp.com/channel/0029Vb9QEzI0rGiMj15Cgu1j",
+  "text": "https://www.munagrocery.in/?item=491417435_s15_rst_52pgj&sp=220",
+  "mode": "auto"
+}'</code></pre>
+                                        <button class="btn btn-sm btn-outline-secondary mb-2" onclick="copyCurl('curl-edit-message', this)">Copy</button>
+                                    </div>
+                                    <div class="mb-3">
+                                        <strong>Delete Message (DELETE /api/v1/message)</strong>
+                                        <pre><code id="curl-delete-message">curl -X DELETE "http://localhost:3000/api/v1/message" \
+-H "Authorization: Bearer YOUR_TOKEN" \
+-H "Content-Type: application/json" \
+-d '{
+  "sessionId": "YOUR_SESSION_ID",
+  "messageId": "3EB08F149623E0E1B95879",
+  "to": "https://whatsapp.com/channel/0029Vb9QEzI0rGiMj15Cgu1j"
+}'</code></pre>
+                                        <button class="btn btn-sm btn-outline-secondary mb-2" onclick="copyCurl('curl-delete-message', this)">Copy</button>
                                     </div>
                                 </div>
                             </div>
@@ -1402,6 +1521,26 @@
             const activeTab = activeTabEl ? activeTabEl.id : 'text-tab';
             const channelTarget = document.getElementById('channel-target')?.value?.trim();
             const recipient = (activeTab === 'channel-tab' && channelTarget) ? channelTarget : apiRecipientInput.value;
+
+            if (activeTab === 'edit-tab') {
+                const messageId = document.getElementById('edit-message-id')?.value || '3EB08F149623E0E1B95879';
+                const target = document.getElementById('edit-recipient')?.value || 'https://whatsapp.com/channel/0029Vb9QEzI0rGiMj15Cgu1j';
+                const newText = document.getElementById('edit-new-text')?.value || 'https://www.munagrocery.in/?item=491417435_s15_rst_52pgj&sp=220';
+                const editMode = document.querySelector('input[name="editModeRadio"]:checked')?.value || 'auto';
+                const sessionData = sessionsData.get(sessionId);
+                const currentToken = sessionData ? sessionData.token : 'YOUR_TOKEN';
+                apiUsageExample.textContent = `curl -X PUT "${window.location.origin}/api/v1/message" \\
+  -H "Authorization: Bearer ${currentToken}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "sessionId": "${sessionId || 'YOUR_SESSION_ID'}",
+    "messageId": "${messageId}",
+    "to": "${target}",
+    "text": "${newText.replace(/'/g, "\\'")}",
+    "mode": "${editMode}"
+  }'`;
+                return;
+            }
 
             if (!sessionId || (!recipient && activeTab !== 'channel-tab')) {
                 apiUsageExample.textContent = 'Please select a session and enter a recipient or channel ID to see an example.';
@@ -1837,6 +1976,185 @@
                 return;
             }
             await sendApiRequest(payloads, btn);
+        }
+
+        function openEditMessageTab() {
+            const editTabBtn = document.getElementById('edit-tab');
+            if (editTabBtn) {
+                const tab = new bootstrap.Tab(editTabBtn);
+                tab.show();
+                setTimeout(() => {
+                    document.getElementById('edit-message-id')?.focus();
+                }, 150);
+            }
+        }
+
+        async function sendEditMessage(btn = null) {
+            const sessionId = apiSessionIdSelect.value;
+            const messageId = document.getElementById('edit-message-id')?.value.trim();
+            const recipient = document.getElementById('edit-recipient')?.value.trim();
+            const newText = document.getElementById('edit-new-text')?.value.trim();
+            const editMode = document.querySelector('input[name="editModeRadio"]:checked')?.value || 'auto';
+
+            if (!sessionId) {
+                alert('Please select an active session.');
+                return;
+            }
+            if (!messageId) {
+                alert('Please enter the Message ID of the message to edit.');
+                document.getElementById('edit-message-id')?.focus();
+                return;
+            }
+            if (!recipient) {
+                alert('Please enter the Recipient (Channel Link, Newsletter JID, Group, or Phone).');
+                document.getElementById('edit-recipient')?.focus();
+                return;
+            }
+            if (!newText) {
+                alert('Please enter the new text or updated product link.');
+                document.getElementById('edit-new-text')?.focus();
+                return;
+            }
+
+            const sessionData = sessionsData.get(sessionId);
+            const currentToken = sessionData ? sessionData.token : '';
+
+            let origHtml = '';
+            if (btn) {
+                origHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Editing...`;
+            }
+
+            apiResponseDiv.innerHTML = `<div class="p-3 bg-body-tertiary rounded text-muted"><span class="spinner-border spinner-border-sm me-2 text-warning"></span>Sending edit request to Baileys server (Mode: ${editMode})...</div>`;
+
+            try {
+                const response = await fetch('/api/v1/message', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${currentToken}`
+                    },
+                    body: JSON.stringify({
+                        sessionId,
+                        messageId,
+                        to: recipient,
+                        text: newText,
+                        mode: editMode
+                    })
+                });
+                const result = await response.json();
+                const isSuccess = response.ok && result.status === 'success';
+
+                apiResponseDiv.innerHTML = `
+                    <div class="alert ${isSuccess ? 'alert-success' : 'alert-danger'} mt-3 shadow-sm">
+                        <div class="d-flex align-items-center mb-2">
+                            <i class="bi ${isSuccess ? 'bi-check-circle-fill text-success' : 'bi-exclamation-triangle-fill text-danger'} fs-5 me-2"></i>
+                            <strong>${isSuccess ? 'Message Edit Request Completed!' : 'Edit Request Failed'}</strong>
+                        </div>
+                        <div class="mb-2 small">
+                            ${isSuccess ? `Mode Used: <strong>${result.mode || 'in-place'}</strong> | Old MsgID: <code>${result.oldMessageId}</code> | Returned MsgID: <code>${result.messageId}</code>` : result.message}
+                        </div>
+                        <pre class="mb-0 small" style="font-family: var(--font-mono); white-space: pre-wrap;">${sanitize(JSON.stringify(result, null, 2))}</pre>
+                    </div>
+                `;
+
+                if (btn && isSuccess) {
+                    btn.innerHTML = `<i class="bi bi-check-circle-fill me-1"></i> Done!`;
+                    btn.classList.replace('btn-warning', 'btn-success');
+                    setTimeout(() => {
+                        btn.disabled = false;
+                        btn.classList.replace('btn-success', 'btn-warning');
+                        btn.innerHTML = origHtml;
+                    }, 2000);
+                } else if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+                apiResponseDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } catch (err) {
+                apiResponseDiv.innerHTML = `<div class="alert alert-danger mt-3"><i class="bi bi-exclamation-triangle-fill me-2"></i>Edit Exception: ${sanitize(err.message)}</div>`;
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+            }
+        }
+
+        async function sendDeleteMessage(btn = null) {
+            const sessionId = apiSessionIdSelect.value;
+            const messageId = document.getElementById('edit-message-id')?.value.trim();
+            const recipient = document.getElementById('edit-recipient')?.value.trim();
+
+            if (!sessionId || !messageId || !recipient) {
+                alert('Please provide Session ID, Message ID, and Recipient to delete.');
+                return;
+            }
+
+            if (!confirm(`Are you sure you want to delete message "${messageId}" on WhatsApp?`)) {
+                return;
+            }
+
+            const sessionData = sessionsData.get(sessionId);
+            const currentToken = sessionData ? sessionData.token : '';
+
+            let origHtml = '';
+            if (btn) {
+                origHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Deleting...`;
+            }
+
+            apiResponseDiv.innerHTML = `<div class="p-3 bg-body-tertiary rounded text-muted"><span class="spinner-border spinner-border-sm me-2 text-danger"></span>Sending delete request to Baileys server...</div>`;
+
+            try {
+                const response = await fetch('/api/v1/message', {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${currentToken}`
+                    },
+                    body: JSON.stringify({
+                        sessionId,
+                        messageId,
+                        to: recipient
+                    })
+                });
+                const result = await response.json();
+                const isSuccess = response.ok && result.status === 'success';
+
+                apiResponseDiv.innerHTML = `
+                    <div class="alert ${isSuccess ? 'alert-success' : 'alert-danger'} mt-3 shadow-sm">
+                        <div class="d-flex align-items-center mb-2">
+                            <i class="bi ${isSuccess ? 'bi-trash-fill text-success' : 'bi-exclamation-triangle-fill text-danger'} fs-5 me-2"></i>
+                            <strong>${isSuccess ? 'Message Deleted Successfully!' : 'Delete Request Failed'}</strong>
+                        </div>
+                        <pre class="mb-0 small" style="font-family: var(--font-mono); white-space: pre-wrap;">${sanitize(JSON.stringify(result, null, 2))}</pre>
+                    </div>
+                `;
+
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+                apiResponseDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } catch (err) {
+                apiResponseDiv.innerHTML = `<div class="alert alert-danger mt-3"><i class="bi bi-exclamation-triangle-fill me-2"></i>Delete Exception: ${sanitize(err.message)}</div>`;
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+            }
+        }
+
+        function clearEditFields() {
+            const idInput = document.getElementById('edit-message-id');
+            const recInput = document.getElementById('edit-recipient');
+            const txtInput = document.getElementById('edit-new-text');
+            if (idInput) idInput.value = '';
+            if (recInput) recInput.value = '';
+            if (txtInput) txtInput.value = '';
+            updateApiUsage();
         }
 
         async function loadSessions() {
