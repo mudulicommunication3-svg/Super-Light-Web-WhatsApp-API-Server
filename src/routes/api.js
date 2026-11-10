@@ -1786,18 +1786,60 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
             const isNewsletter = destination.endsWith('@newsletter');
 
-            if (isNewsletter && editMode !== 'force_edit') {
-                // WhatsApp Channels (@newsletter) are broadcast feeds and do NOT support in-place protocol MESSAGE_EDIT
-                // via third-party WhatsApp Web sockets. To update channel followers, publish the updated post to the channel.
+            if (isNewsletter && editMode !== 'replace') {
+                // In WhatsApp Channels (@newsletter), messages are identified on WhatsApp server by sequential server_id.
+                // We first attempt the native WhatsApp Web Protocol newsletter edit stanza (edit="1" with server_id).
+                let channelEditSuccess = false;
+                let targetServerId = String(messageId);
+
                 try {
-                    await session.sock.sendMessage(destination, { delete: editKey });
-                    log('Attempted delete of old channel post before repost', messageId, { event: 'channel-message-delete-attempt', messageId, sessionId, destination });
-                } catch (delErr) {
-                    console.warn(`[WhatsApp] Deleting old channel post ${messageId} failed: ${delErr.message}`);
+                    // If messageId is a client hash (e.g. 3EB0...), attempt to resolve its server_id via newsletterFetchMessages
+                    if (session.sock.newsletterFetchMessages && !/^\d+$/.test(targetServerId)) {
+                        try {
+                            const updates = await session.sock.newsletterFetchMessages(destination, 50);
+                            const { getAllBinaryNodeChildren } = require('@whiskeysockets/baileys');
+                            const children = getAllBinaryNodeChildren(updates);
+                            for (const ch of children) {
+                                if (ch.attrs && (ch.attrs.message_id === messageId || ch.attrs.id === messageId || ch.attrs.server_id === messageId)) {
+                                    targetServerId = ch.attrs.server_id || ch.attrs.message_id;
+                                    log('Resolved channel server_id for edit', messageId, { targetServerId, destination });
+                                    break;
+                                }
+                            }
+                        } catch (fErr) {
+                            console.warn(`[WhatsApp] Resolving newsletter server_id: ${fErr.message}`);
+                        }
+                    }
+
+                    const { generateWAMessage } = require('@whiskeysockets/baileys');
+                    const fullMsg = await generateWAMessage(destination, textPayload, { userJid: session.sock.user?.id });
+
+                    const newEditMsgId = session.sock.generateMessageTag ? session.sock.generateMessageTag() : `ED_${Date.now()}`;
+                    await session.sock.relayMessage(destination, fullMsg.message, {
+                        messageId: newEditMsgId,
+                        additionalAttributes: {
+                            edit: '1',
+                            server_id: String(targetServerId)
+                        }
+                    });
+
+                    channelEditSuccess = true;
+                    finalMessageId = messageId;
+                    editModeUsed = 'newsletter-in-place-edit';
+                    log('Native newsletter in-place edit stanza delivered', messageId, { destination, serverId: targetServerId, editMsgId: newEditMsgId });
+                } catch (nlEditErr) {
+                    console.warn(`[WhatsApp] Native newsletter edit rejected by WhatsApp server (${nlEditErr.message}). Falling back to channel broadcast:`, nlEditErr);
                 }
-                result = await session.sock.sendMessage(destination, textPayload);
-                finalMessageId = result?.key?.id || messageId;
-                editModeUsed = 'channel-repost';
+
+                if (!channelEditSuccess) {
+                    // Fallback: Delete old post (if allowed) and broadcast updated post
+                    try {
+                        await session.sock.sendMessage(destination, { delete: editKey });
+                    } catch (_) {}
+                    result = await session.sock.sendMessage(destination, textPayload);
+                    finalMessageId = result?.key?.id || messageId;
+                    editModeUsed = 'channel-repost (server-fallback)';
+                }
             } else if (editMode === 'replace') {
                 // Explicit delete and repost
                 try {
