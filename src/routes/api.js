@@ -1663,11 +1663,13 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         res.status(200).json(results);
     });
 
-    router.delete('/message', async (req, res) => {
+    // Delete Message Endpoint: DELETE /api/message and DELETE /api/v1/message
+    const handleDeleteMessage = async (req, res) => {
         log('API request', 'SYSTEM', { event: 'api-request', method: req.method, endpoint: req.originalUrl, body: req.body });
-        const { sessionId, messageId, remoteJid } = req.body;
+        const { sessionId, messageId, remoteJid, to } = req.body;
+        const target = remoteJid || to;
 
-        if (!sessionId || !messageId || !remoteJid) {
+        if (!sessionId || !messageId || !target) {
             log('API error', 'SYSTEM', { event: 'api-error', error: 'sessionId, messageId, and remoteJid are required.', endpoint: req.originalUrl });
             return res.status(400).json({ status: 'error', message: 'sessionId, messageId, and remoteJid are required.' });
         }
@@ -1679,26 +1681,30 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         }
 
         try {
-            await session.sock.chatModify({
-                clear: { messages: [{ id: messageId, fromMe: true, timestamp: 0 }] }
-            }, remoteJid);
+            let destination = target;
+            if (!destination.endsWith('@newsletter') && !destination.endsWith('@g.us')) {
+                const { jidNormalizedUser } = require('@whiskeysockets/baileys');
+                destination = jidNormalizedUser(destination.includes('@') ? destination : `${destination.replace(/^\+/, '')}@s.whatsapp.net`);
+            }
 
-            // The above is for clearing. For actual deletion:
-            await session.sock.sendMessage(remoteJid, { delete: { remoteJid: remoteJid, fromMe: true, id: messageId } });
+            await session.sock.sendMessage(destination, { delete: { remoteJid: destination, fromMe: true, id: messageId } });
 
-            log('Message deleted', messageId, { event: 'message-deleted', messageId, sessionId });
-            res.status(200).json({ status: 'success', message: `Attempted to delete message ${messageId}` });
+            log('Message deleted', messageId, { event: 'message-deleted', messageId, sessionId, destination });
+            res.status(200).json({ status: 'success', message: `Message ${messageId} deleted successfully.` });
         } catch (error) {
             log('API error', 'SYSTEM', { event: 'api-error', error: error.message, endpoint: req.originalUrl });
             console.error(`Failed to delete message ${messageId}:`, error);
             res.status(500).json({ status: 'error', message: `Failed to delete message. Reason: ${error.message}` });
         }
-    });
+    };
+
+    router.delete('/message', handleDeleteMessage);
+    router.delete('/v1/message', handleDeleteMessage);
 
     // Edit Message Endpoint: PUT /api/message and PUT /api/v1/message
     const handleEditMessage = async (req, res) => {
         log('API request', 'SYSTEM', { event: 'api-request', method: req.method, endpoint: req.originalUrl, body: req.body });
-        let { sessionId, messageId, remoteJid, to, text, newText } = req.body;
+        let { sessionId, messageId, remoteJid, to, text, newText, forceReplace } = req.body;
         const target = remoteJid || to;
         const updateText = text || newText;
 
@@ -1725,22 +1731,63 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             const { buildTextMessageWithPreview } = require('../services/whatsapp');
             const textPayload = await buildTextMessageWithPreview(updateText, session.sock, destination);
 
-            const editKey = {
-                remoteJid: destination,
-                fromMe: true,
-                id: messageId
-            };
+            const isChannel = destination.endsWith('@newsletter');
+            let result;
+            let finalMessageId = messageId;
 
-            const result = await session.sock.sendMessage(destination, {
-                ...textPayload,
-                edit: editKey
-            });
+            if (isChannel || forceReplace) {
+                // WhatsApp Channels (@newsletter) do NOT support in-place signal edits.
+                // Replace pattern: delete previous post and post the new link message.
+                try {
+                    await session.sock.sendMessage(destination, {
+                        delete: {
+                            remoteJid: destination,
+                            fromMe: true,
+                            id: messageId
+                        }
+                    });
+                    log('Channel old message deleted', messageId, { event: 'channel-message-deleted', messageId, sessionId, destination });
+                } catch (delErr) {
+                    console.warn(`[WhatsApp] Deleting old channel message ${messageId} failed: ${delErr.message}`);
+                }
+
+                result = await session.sock.sendMessage(destination, textPayload);
+                finalMessageId = result?.key?.id || messageId;
+            } else {
+                // Standard personal or group chat: attempt in-place edit
+                try {
+                    const editKey = {
+                        remoteJid: destination,
+                        fromMe: true,
+                        id: messageId
+                    };
+
+                    result = await session.sock.sendMessage(destination, {
+                        ...textPayload,
+                        edit: editKey
+                    });
+                    finalMessageId = result?.key?.id || messageId;
+                } catch (editErr) {
+                    console.warn(`[WhatsApp] Direct edit failed (${editErr.message}), falling back to delete-and-repost...`);
+                    try {
+                        await session.sock.sendMessage(destination, {
+                            delete: {
+                                remoteJid: destination,
+                                fromMe: true,
+                                id: messageId
+                            }
+                        });
+                    } catch (_) {}
+                    result = await session.sock.sendMessage(destination, textPayload);
+                    finalMessageId = result?.key?.id || messageId;
+                }
+            }
 
             // Update in DB if cached
             try {
                 const ChatMessage = require('../models/ChatMessage');
                 ChatMessage.save({
-                    id: messageId,
+                    id: finalMessageId,
                     sessionId,
                     remoteJid: destination,
                     fromMe: 1,
@@ -1749,12 +1796,18 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                 });
             } catch (_) {}
 
-            log('Message edited', messageId, { event: 'message-edited', messageId, sessionId, destination });
-            res.status(200).json({ status: 'success', message: `Message ${messageId} updated successfully`, messageId: result?.key?.id || messageId });
+            log('Message updated', finalMessageId, { event: 'message-updated', oldMessageId: messageId, messageId: finalMessageId, sessionId, destination });
+            res.status(200).json({
+                status: 'success',
+                message: `Message updated successfully (old: ${messageId}, new: ${finalMessageId})`,
+                messageId: finalMessageId,
+                oldMessageId: messageId,
+                data: result
+            });
         } catch (error) {
             log('API error', 'SYSTEM', { event: 'api-error', error: error.message, endpoint: req.originalUrl });
-            console.error(`Failed to edit message ${messageId}:`, error);
-            res.status(500).json({ status: 'error', message: `Failed to edit message. Reason: ${error.message}` });
+            console.error(`Failed to update message ${messageId}:`, error);
+            res.status(500).json({ status: 'error', message: `Failed to update message. Reason: ${error.message}` });
         }
     };
 

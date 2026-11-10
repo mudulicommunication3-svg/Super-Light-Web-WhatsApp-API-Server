@@ -617,6 +617,22 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
     }
 
     const matchedUrl = urlMatch[0].replace(/[.,;!?)\]]+$/, '');
+
+    // Extract any query params embedded directly in the share URL
+    let urlParamImg = null;
+    let urlParamTitle = null;
+    let urlParamSp = null;
+    let urlParamMrp = null;
+    let urlParamStk = null;
+    try {
+        const u = new URL(matchedUrl);
+        urlParamImg = u.searchParams.get('img') || u.searchParams.get('image');
+        urlParamTitle = u.searchParams.get('n') || u.searchParams.get('name');
+        urlParamSp = u.searchParams.get('sp') || u.searchParams.get('price');
+        urlParamMrp = u.searchParams.get('mrp') || u.searchParams.get('m');
+        urlParamStk = u.searchParams.get('stk') || u.searchParams.get('stock');
+    } catch (_) {}
+
     const fetchOpts = {
         timeout: 8000,
         headers: {
@@ -626,123 +642,149 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
         }
     };
 
+    let urlInfo = null;
     try {
         if (typeof getUrlInfo === 'function') {
-            // 1. Fetch OpenGraph metadata with high thumbnail width
-            const urlInfo = await getUrlInfo(matchedUrl, {
+            urlInfo = await getUrlInfo(matchedUrl, {
                 thumbnailWidth: 640,
                 fetchOpts,
                 logger
             });
-
-            if (urlInfo) {
-                urlInfo['matched-text'] = matchedUrl;
-
-                let imgUrl = urlInfo.originalThumbnailUrl;
-                if (imgUrl && !imgUrl.startsWith('http://') && !imgUrl.startsWith('https://')) {
-                    try {
-                        imgUrl = new URL(imgUrl, matchedUrl).href;
-                    } catch (_) {}
-                }
-
-                // 2. Download and generate high-resolution, unblurred baseline JPEG (JioMart/CDNs often serve
-                // AVIF/WebP which need transcoding and high pixel density for mobile cards).
-                if (imgUrl) {
-                    try {
-                        const axios = require('axios');
-                        const imgResp = await axios.get(imgUrl, {
-                            responseType: 'arraybuffer',
-                            timeout: 8000,
-                            headers: {
-                                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                                'accept': 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8'
-                            }
-                        });
-                        const rawImgBuffer = Buffer.from(imgResp.data);
-
-                        let hqBuffer = null;
-                        let inlineThumb = null;
-                        let thumbDimensions = { width: 800, height: 800 };
-
-                        try {
-                            const sharp = require('sharp');
-                            // 1. Generate high-definition 800px JPEG for Big Image Preview card (with clean white background)
-                            hqBuffer = await sharp(rawImgBuffer)
-                                .flatten({ background: { r: 255, g: 255, b: 255 } })
-                                .resize({ width: 800, height: 800, fit: 'inside', withoutEnlargement: true })
-                                .jpeg({ quality: 85, progressive: false })
-                                .toBuffer();
-
-                            const hqMeta = await sharp(hqBuffer).metadata();
-                            thumbDimensions.width = hqMeta.width || 800;
-                            thumbDimensions.height = hqMeta.height || 800;
-
-                            // 2. Generate crisp 640px inline fallback thumbnail (must stay < 80KB for WhatsApp proto)
-                            inlineThumb = await sharp(rawImgBuffer)
-                                .flatten({ background: { r: 255, g: 255, b: 255 } })
-                                .resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: true })
-                                .jpeg({ quality: 80, progressive: false })
-                                .toBuffer();
-
-                            if (inlineThumb.length > 80000) {
-                                inlineThumb = await sharp(rawImgBuffer)
-                                    .flatten({ background: { r: 255, g: 255, b: 255 } })
-                                    .resize({ width: 550, height: 550, fit: 'inside', withoutEnlargement: true })
-                                    .jpeg({ quality: 75, progressive: false })
-                                    .toBuffer();
-                            }
-
-                            urlInfo.jpegThumbnail = inlineThumb;
-                        } catch (sharpErr) {
-                            console.warn(`[WhatsApp] Sharp processing for ${matchedUrl}: ${sharpErr.message}`);
-                        }
-
-                        // Attach highQualityThumbnail with directPath and explicit dimensions for BIG IMAGE PREVIEW.
-                        // WhatsApp clients check for thumbnailDirectPath + thumbnailWidth/Height to render the large banner card.
-                        // CRITICAL: Passing jid: targetJid signals Baileys to upload raw, unencrypted public media for Channels (@newsletter).
-                        // If mediaKey/fileEncSha256 is present on a channel message, subscribers cannot decrypt it and WhatsApp renders a black blank box.
-                        if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && (hqBuffer || inlineThumb)) {
-                            const isChannel = Boolean(targetJid && (
-                                targetJid.endsWith('@newsletter') ||
-                                (typeof isJidNewsletter === 'function' && isJidNewsletter(targetJid))
-                            ));
-
-                            const { imageMessage } = await prepareWAMessageMedia(
-                                { image: hqBuffer || inlineThumb },
-                                {
-                                    upload: sock.waUploadToServer,
-                                    mediaTypeOverride: 'thumbnail-link',
-                                    jid: targetJid || undefined,
-                                    logger
-                                }
-                            );
-                            if (imageMessage) {
-                                imageMessage.width = thumbDimensions.width;
-                                imageMessage.height = thumbDimensions.height;
-
-                                if (isChannel) {
-                                    // Guarantee no encrypted E2EE media keys are attached to public channel messages
-                                    delete imageMessage.mediaKey;
-                                    delete imageMessage.mediaKeyTimestamp;
-                                    delete imageMessage.fileEncSha256;
-                                }
-
-                                urlInfo.highQualityThumbnail = imageMessage;
-                            }
-                        }
-                    } catch (imgErr) {
-                        console.warn(`[WhatsApp] Thumbnail download/upload failed for ${matchedUrl}, using fallback preview: ${imgErr.message}`);
-                        delete urlInfo.highQualityThumbnail;
-                    }
-                }
-
-                messageData.linkPreview = urlInfo;
-            }
         }
-    } catch (err) {
-        console.warn(`[WhatsApp] Link preview generation failed for ${matchedUrl}, falling back to plain text: ${err.message}`);
+    } catch (scErr) {
+        console.warn(`[WhatsApp] Scrape failed for ${matchedUrl}: ${scErr.message}`);
     }
 
+    // If scraping returned no info or no image, synthesize urlInfo from URL query parameters
+    if (!urlInfo) {
+        urlInfo = {
+            'matched-text': matchedUrl,
+            canonicalUrl: matchedUrl,
+            title: urlParamTitle || 'Munna Grocery Store',
+            description: urlParamSp ? `₹${urlParamSp} (MRP ₹${urlParamMrp || urlParamSp}) • Stock: ${urlParamStk || 'Available'}` : 'Order grocery items online',
+            originalThumbnailUrl: urlParamImg || null
+        };
+    } else {
+        urlInfo['matched-text'] = matchedUrl;
+        if (!urlInfo.title && urlParamTitle) {
+            urlInfo.title = urlParamTitle;
+        }
+        if (urlParamSp && (!urlInfo.description || urlInfo.description.length < 5)) {
+            urlInfo.description = `₹${urlParamSp} (MRP ₹${urlParamMrp || urlParamSp}) • Stock: ${urlParamStk || 'Available'}`;
+        }
+        if (!urlInfo.originalThumbnailUrl && urlParamImg) {
+            urlInfo.originalThumbnailUrl = urlParamImg;
+        }
+    }
+
+    let imgUrl = urlInfo.originalThumbnailUrl || urlParamImg;
+    if (imgUrl && !imgUrl.startsWith('http://') && !imgUrl.startsWith('https://')) {
+        try {
+            imgUrl = new URL(imgUrl, matchedUrl).href;
+        } catch (_) {}
+    }
+
+    if (imgUrl) {
+        try {
+            const axios = require('axios');
+            const imgResp = await axios.get(imgUrl, {
+                responseType: 'arraybuffer',
+                timeout: 9000,
+                headers: {
+                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'accept': 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8',
+                    'referer': matchedUrl
+                }
+            });
+            const rawImgBuffer = Buffer.from(imgResp.data);
+
+            let hqBuffer = null;
+            let inlineThumb = null;
+            let thumbDimensions = { width: 800, height: 800 };
+
+            try {
+                const sharp = require('sharp');
+                // 1. High-definition 800px JPEG for Big Image Preview card (clean white background)
+                hqBuffer = await sharp(rawImgBuffer)
+                    .flatten({ background: { r: 255, g: 255, b: 255 } })
+                    .resize({ width: 800, height: 800, fit: 'inside', withoutEnlargement: true })
+                    .jpeg({ quality: 85, progressive: false })
+                    .toBuffer();
+
+                const hqMeta = await sharp(hqBuffer).metadata();
+                thumbDimensions.width = hqMeta.width || 800;
+                thumbDimensions.height = hqMeta.height || 800;
+
+                // 2. Inline thumbnail < 80KB for instant mobile display
+                inlineThumb = await sharp(rawImgBuffer)
+                    .flatten({ background: { r: 255, g: 255, b: 255 } })
+                    .resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: true })
+                    .jpeg({ quality: 80, progressive: false })
+                    .toBuffer();
+
+                if (inlineThumb.length > 80000) {
+                    inlineThumb = await sharp(rawImgBuffer)
+                        .flatten({ background: { r: 255, g: 255, b: 255 } })
+                        .resize({ width: 550, height: 550, fit: 'inside', withoutEnlargement: true })
+                        .jpeg({ quality: 75, progressive: false })
+                        .toBuffer();
+                }
+
+                urlInfo.jpegThumbnail = inlineThumb;
+            } catch (sharpErr) {
+                console.warn(`[WhatsApp] Sharp processing for ${matchedUrl}: ${sharpErr.message}`);
+            }
+
+            const isChannel = Boolean(targetJid && (
+                targetJid.endsWith('@newsletter') ||
+                (typeof isJidNewsletter === 'function' && isJidNewsletter(targetJid))
+            ));
+
+            const cardTitle = urlInfo.title || urlParamTitle || 'Munna Grocery';
+            const cardBody = urlInfo.description || (urlParamSp ? `₹${urlParamSp} (MRP ₹${urlParamMrp || urlParamSp})` : '');
+
+            // externalAdReply with renderLargerThumbnail: true produces the modern full-width banner
+            messageData.contextInfo = {
+                externalAdReply: {
+                    title: cardTitle,
+                    body: cardBody,
+                    mediaType: 1, // IMAGE
+                    thumbnailUrl: imgUrl,
+                    thumbnail: inlineThumb || hqBuffer,
+                    sourceUrl: matchedUrl,
+                    renderLargerThumbnail: true,
+                    showAdAttribution: false
+                }
+            };
+
+            if (isChannel) {
+                // In channels, do not attach encrypted MMS media keys
+                delete urlInfo.highQualityThumbnail;
+            } else {
+                if (sock?.waUploadToServer && typeof prepareWAMessageMedia === 'function' && (hqBuffer || inlineThumb)) {
+                    const { imageMessage } = await prepareWAMessageMedia(
+                        { image: hqBuffer || inlineThumb },
+                        {
+                            upload: sock.waUploadToServer,
+                            mediaTypeOverride: 'thumbnail-link',
+                            jid: targetJid || undefined,
+                            logger
+                        }
+                    );
+                    if (imageMessage) {
+                        imageMessage.width = thumbDimensions.width;
+                        imageMessage.height = thumbDimensions.height;
+                        urlInfo.highQualityThumbnail = imageMessage;
+                    }
+                }
+            }
+        } catch (imgErr) {
+            console.warn(`[WhatsApp] Thumbnail download/upload failed for ${imgUrl}: ${imgErr.message}`);
+            delete urlInfo.highQualityThumbnail;
+        }
+    }
+
+    messageData.linkPreview = urlInfo;
     return messageData;
 }
 
