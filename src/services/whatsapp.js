@@ -629,6 +629,84 @@ async function getJoinedGroups(sessionId) {
  * @param {string} [targetJid] - Target JID (used to detect channels vs direct chats)
  * @returns {Promise<{ text: string, linkPreview?: object }>}
  */
+// In-memory cache of product names by EAN and image URL for instant fallback when &n= is omitted in edited links
+const productTitleCache = new Map();
+let lastProductCatalogFetchMs = 0;
+let inFlightCatalogPromise = null;
+
+async function resolveProductNameFromCatalog(cleanEan, imgUrl) {
+    const eanKey = cleanEan ? String(cleanEan).trim().toLowerCase() : '';
+    const imgKey = imgUrl ? String(imgUrl).trim().toLowerCase() : '';
+
+    if (eanKey && productTitleCache.has(eanKey)) return productTitleCache.get(eanKey);
+    if (imgKey && productTitleCache.has(imgKey)) return productTitleCache.get(imgKey);
+
+    // 1. Check local SQLite chat_messages for any previous link with this EAN that had &n=
+    if (eanKey) {
+        try {
+            const { db } = require('../config/database');
+            const row = db.prepare(`
+                SELECT body FROM chat_messages
+                WHERE body LIKE ? AND body LIKE '%&n=%'
+                ORDER BY timestamp DESC LIMIT 1
+            `).get(`%${eanKey}%`);
+            if (row && row.body) {
+                const m = String(row.body).match(/[?&]n=([^&#\s]+)/i);
+                if (m && m[1]) {
+                    const decoded = decodeURIComponent(m[1]).replace(/\+/g, ' ').trim();
+                    if (decoded && !/^Munna\s+(Mobile\s*&\s*)?Grocery/i.test(decoded)) {
+                        productTitleCache.set(eanKey, decoded);
+                        return decoded;
+                    }
+                }
+            }
+        } catch (_) {}
+    }
+
+    // 2. Fetch live Google Sheet catalog (cached for 5 minutes)
+    if (Date.now() - lastProductCatalogFetchMs > 300000 && !inFlightCatalogPromise) {
+        inFlightCatalogPromise = (async () => {
+            try {
+                const axios = require('axios');
+                const sheetUrl = 'https://script.google.com/macros/s/AKfycbyBG-2536FNp4Kdux8GSBjKMyHjaSBWqSIaJpHDQ68GtzKpyUYR9x_N9QthMdvXPNhE/exec?action=get_products&sheet_id=1wj0Lg32nIDjCDadnBovK2u0agpJ4gIJr1ahxya1GMGE&worksheet=Sheet1&nocache=1';
+                const resp = await axios.get(sheetUrl, { timeout: 7000 });
+                const data = resp.data;
+                const list = Array.isArray(data) ? data : (data?.products || data?.data || []);
+                if (Array.isArray(list) && list.length > 0) {
+                    lastProductCatalogFetchMs = Date.now();
+                    for (const item of list) {
+                        const pName = String(item.product_name || item.name || '').replace(/\s+/g, ' ').trim();
+                        if (!pName) continue;
+                        const allEans = `${item.primary_ean || ''},${item.ean || ''},${item.additional_eans || ''},${Array.isArray(item.ean_list) ? item.ean_list.join(',') : ''}`;
+                        for (const tk of allEans.split(/[,|;\s]+/)) {
+                            const cleanTk = tk.replace(/^EAN-/i, '').split('_')[0].trim().toLowerCase();
+                            if (cleanTk) productTitleCache.set(cleanTk, pName);
+                        }
+                        const bkp = String(item.backup_image_url || '').trim().toLowerCase();
+                        const pri = String(item.image_url || item.image || '').trim().toLowerCase();
+                        if (bkp) productTitleCache.set(bkp, pName);
+                        if (pri) productTitleCache.set(pri, pName);
+                    }
+                }
+            } catch (_) {
+            } finally {
+                inFlightCatalogPromise = null;
+            }
+        })();
+    }
+
+    if (inFlightCatalogPromise) {
+        await Promise.race([
+            inFlightCatalogPromise,
+            new Promise(r => setTimeout(r, 4500))
+        ]);
+    }
+
+    if (eanKey && productTitleCache.has(eanKey)) return productTitleCache.get(eanKey);
+    if (imgKey && productTitleCache.has(imgKey)) return productTitleCache.get(imgKey);
+    return null;
+}
+
 async function buildTextMessageWithPreview(text, sock = null, targetJid = null) {
     const messageData = { text };
     if (typeof text !== 'string' || !text) {
@@ -648,11 +726,21 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
     let urlParamSp = null;
     let urlParamMrp = null;
     let urlParamStk = null;
+    let cleanItemEan = null;
     try {
         const u = new URL(matchedUrl);
+        const rawItem = u.searchParams.get('item') || u.searchParams.get('product') || u.searchParams.get('ean') || u.searchParams.get('id');
+        if (rawItem) {
+            cleanItemEan = String(rawItem).split(/[,;|\s]+/)[0].split('_')[0].replace(/^EAN-/i, '').trim();
+        }
         urlParamImg = u.searchParams.get('img') || u.searchParams.get('image');
         urlParamTitle = u.searchParams.get('n') || u.searchParams.get('name');
         urlParamSp = u.searchParams.get('sp') || u.searchParams.get('price');
+        if (!urlParamSp) {
+            const vParam = u.searchParams.get('v') || '';
+            const vSpMatch = vParam.split('_')[0].match(/^\d+(\.\d+)?$/);
+            if (vSpMatch) urlParamSp = vSpMatch[0];
+        }
         urlParamMrp = u.searchParams.get('mrp') || u.searchParams.get('m');
         urlParamStk = u.searchParams.get('stk') || u.searchParams.get('stock');
         // If stk param is not explicit, extract embedded stock quantity from _s{qty}_ or _s{qty}
@@ -663,6 +751,13 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
             }
         }
     } catch (_) {}
+
+    if (urlParamTitle && cleanItemEan && !/^Munna\s+(Mobile\s*&\s*)?Grocery/i.test(urlParamTitle)) {
+        productTitleCache.set(cleanItemEan.toLowerCase(), urlParamTitle);
+        if (urlParamImg) productTitleCache.set(urlParamImg.trim().toLowerCase(), urlParamTitle);
+    } else if (!urlParamTitle && (cleanItemEan || urlParamImg)) {
+        urlParamTitle = await resolveProductNameFromCatalog(cleanItemEan, urlParamImg);
+    }
 
     const fetchOpts = {
         timeout: 8000,
@@ -699,19 +794,24 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
         ? `Rs ${urlParamSp}${mrpBadge}${savingsBadge} ${stockStatusText} • Munna Mobile & Grocery, Cinema Hall Road, Niali`
         : 'Munna Mobile & Grocery, Cinema Hall Road, Niali';
 
+    const formattedProductTitle = urlParamTitle
+        ? (urlParamSp && !/\bRs\s*\d+/i.test(urlParamTitle) ? `${urlParamTitle} Rs ${urlParamSp}` : urlParamTitle)
+        : null;
+
     // If scraping returned no info or no image, synthesize urlInfo from URL query parameters
     if (!urlInfo) {
         urlInfo = {
             'matched-text': matchedUrl,
             canonicalUrl: matchedUrl,
-            title: urlParamTitle || 'Munna Grocery Store',
+            title: formattedProductTitle || 'Munna Grocery Store',
             description: synthesizedDescription,
             originalThumbnailUrl: urlParamImg || null
         };
     } else {
         urlInfo['matched-text'] = matchedUrl;
-        if (!urlInfo.title && urlParamTitle) {
-            urlInfo.title = urlParamTitle;
+        // Override missing or generic "Munna Grocery Rs 235" fallback title with actual resolved product name
+        if (formattedProductTitle && (!urlInfo.title || /^Munna\s+(Mobile\s*&\s*)?Grocery\b/i.test(urlInfo.title.trim()))) {
+            urlInfo.title = formattedProductTitle;
         }
         // If scrape returned Out of Stock or empty but the URL has live stock, fix description to reflect accurate stock
         if (resolvedStockNum !== null && resolvedStockNum > 0) {
