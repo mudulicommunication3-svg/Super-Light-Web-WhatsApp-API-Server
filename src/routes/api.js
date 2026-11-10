@@ -1784,7 +1784,21 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                 id: messageId
             };
 
-            if (editMode === 'replace') {
+            const isNewsletter = destination.endsWith('@newsletter');
+
+            if (isNewsletter && editMode !== 'force_edit') {
+                // WhatsApp Channels (@newsletter) are broadcast feeds and do NOT support in-place protocol MESSAGE_EDIT
+                // via third-party WhatsApp Web sockets. To update channel followers, publish the updated post to the channel.
+                try {
+                    await session.sock.sendMessage(destination, { delete: editKey });
+                    log('Attempted delete of old channel post before repost', messageId, { event: 'channel-message-delete-attempt', messageId, sessionId, destination });
+                } catch (delErr) {
+                    console.warn(`[WhatsApp] Deleting old channel post ${messageId} failed: ${delErr.message}`);
+                }
+                result = await session.sock.sendMessage(destination, textPayload);
+                finalMessageId = result?.key?.id || messageId;
+                editModeUsed = 'channel-repost';
+            } else if (editMode === 'replace') {
                 // Explicit delete and repost
                 try {
                     await session.sock.sendMessage(destination, { delete: editKey });
@@ -1804,7 +1818,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                 finalMessageId = result?.key?.id || messageId;
                 editModeUsed = 'in-place (forced)';
             } else {
-                // Auto mode: attempt in-place edit first
+                // Auto mode: attempt in-place edit first (supported on 1-on-1 chats and groups)
                 try {
                     result = await session.sock.sendMessage(destination, {
                         ...textPayload,

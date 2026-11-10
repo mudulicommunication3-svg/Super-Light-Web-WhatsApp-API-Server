@@ -631,6 +631,13 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
         urlParamSp = u.searchParams.get('sp') || u.searchParams.get('price');
         urlParamMrp = u.searchParams.get('mrp') || u.searchParams.get('m');
         urlParamStk = u.searchParams.get('stk') || u.searchParams.get('stock');
+        // If stk param is not explicit, extract embedded stock quantity from _s{qty}_ or _s{qty}
+        if (!urlParamStk) {
+            const stkMatch = matchedUrl.match(/[?&_]s(?:tk)?(\d+)(?:_|$|&)/i);
+            if (stkMatch && stkMatch[1]) {
+                urlParamStk = stkMatch[1];
+            }
+        }
     } catch (_) {}
 
     const fetchOpts = {
@@ -655,13 +662,26 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
         console.warn(`[WhatsApp] Scrape failed for ${matchedUrl}: ${scErr.message}`);
     }
 
+    const resolvedStockNum = (urlParamStk !== null && urlParamStk !== undefined && !isNaN(Number(urlParamStk))) ? Number(urlParamStk) : null;
+    const stockStatusText = resolvedStockNum !== null
+        ? (resolvedStockNum > 0 ? `In Stock (${resolvedStockNum}pc)` : 'Out of Stock')
+        : 'In Stock';
+    const savingsPercent = (urlParamSp && urlParamMrp && Number(urlParamMrp) > Number(urlParamSp))
+        ? Math.round(((Number(urlParamMrp) - Number(urlParamSp)) / Number(urlParamMrp)) * 100)
+        : 0;
+    const savingsBadge = savingsPercent > 0 ? ` (${savingsPercent}% OFF)` : '';
+    const mrpBadge = (urlParamMrp && Number(urlParamMrp) > 0) ? ` MRP ${urlParamMrp}` : '';
+    const synthesizedDescription = urlParamSp
+        ? `Rs ${urlParamSp}${mrpBadge}${savingsBadge} ${stockStatusText} • Munna Mobile & Grocery, Cinema Hall Road, Niali`
+        : 'Munna Mobile & Grocery, Cinema Hall Road, Niali';
+
     // If scraping returned no info or no image, synthesize urlInfo from URL query parameters
     if (!urlInfo) {
         urlInfo = {
             'matched-text': matchedUrl,
             canonicalUrl: matchedUrl,
             title: urlParamTitle || 'Munna Grocery Store',
-            description: urlParamSp ? `₹${urlParamSp} (MRP ₹${urlParamMrp || urlParamSp}) • Stock: ${urlParamStk || 'Available'}` : 'Order grocery items online',
+            description: synthesizedDescription,
             originalThumbnailUrl: urlParamImg || null
         };
     } else {
@@ -669,8 +689,13 @@ async function buildTextMessageWithPreview(text, sock = null, targetJid = null) 
         if (!urlInfo.title && urlParamTitle) {
             urlInfo.title = urlParamTitle;
         }
-        if (urlParamSp && (!urlInfo.description || urlInfo.description.length < 5)) {
-            urlInfo.description = `₹${urlParamSp} (MRP ₹${urlParamMrp || urlParamSp}) • Stock: ${urlParamStk || 'Available'}`;
+        // If scrape returned Out of Stock or empty but the URL has live stock, fix description to reflect accurate stock
+        if (resolvedStockNum !== null && resolvedStockNum > 0) {
+            if (!urlInfo.description || urlInfo.description.length < 5 || urlInfo.description.includes('Out of Stock')) {
+                urlInfo.description = synthesizedDescription;
+            }
+        } else if (urlParamSp && (!urlInfo.description || urlInfo.description.length < 5)) {
+            urlInfo.description = synthesizedDescription;
         }
         if (!urlInfo.originalThumbnailUrl && urlParamImg) {
             urlInfo.originalThumbnailUrl = urlParamImg;
