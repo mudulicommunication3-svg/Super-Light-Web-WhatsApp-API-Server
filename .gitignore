@@ -55,3 +55,7 @@ whatsapp_campaign_plan.md
 # OS Files
 .DS_Store
 Thumbs.db
+
+# AI Studio multi-project workspace
+connected_projects/
+public/assets/aistudio/
