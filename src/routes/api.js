@@ -1893,6 +1893,103 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         return { clientMsgId, serverId };
     }
 
+    // Sends a WhatsApp Newsletter Admin Edit (edit="3") or Admin Revoke (edit="8") stanza
+    // matching whatsmeow/send.go sendNewsletter() and waits for the server's <ack class="message">
+    async function sendNewsletterEditOrRevoke(sock, channelJid, clientMsgId, editAttr, protoMessage = null) {
+        const { encodeNewsletterMessage } = require('@whiskeysockets/baileys');
+
+        const sendOnceAndWaitAck = async (includeMediaTypeAttr) => {
+            const ptAttrs = {};
+            let ptContent;
+            if (editAttr === '8' || !protoMessage) {
+                ptContent = undefined;
+            } else {
+                ptContent = encodeNewsletterMessage(protoMessage);
+                if (includeMediaTypeAttr && protoMessage?.extendedTextMessage?.title) {
+                    ptAttrs.mediatype = 'url';
+                }
+            }
+
+            // CRITICAL (from whatsmeow/send.go lines 718-753):
+            // <message> attrs MUST ONLY contain { to, id, type, edit }.
+            // NEVER include server_id in <message> attrs on edit="3" or edit="8" (triggers smax-invalid 479).
+            const stanza = {
+                tag: 'message',
+                attrs: {
+                    to: channelJid,
+                    id: String(clientMsgId),
+                    type: 'text',
+                    edit: String(editAttr)
+                },
+                content: [
+                    {
+                        tag: 'plaintext',
+                        attrs: ptAttrs,
+                        ...(ptContent !== undefined ? { content: ptContent } : {})
+                    }
+                ]
+            };
+
+            return await new Promise((resolve, reject) => {
+                let settled = false;
+                let timer = null;
+
+                const onAck = (node) => {
+                    if (!node || !node.attrs) return;
+                    if (String(node.attrs.id) === String(clientMsgId)) {
+                        settled = true;
+                        if (timer) clearTimeout(timer);
+                        if (sock.ws && typeof sock.ws.off === 'function') {
+                            sock.ws.off('CB:ack,class:message', onAck);
+                        } else if (sock.ws && typeof sock.ws.removeListener === 'function') {
+                            sock.ws.removeListener('CB:ack,class:message', onAck);
+                        }
+                        resolve(node.attrs);
+                    }
+                };
+
+                if (sock.ws && typeof sock.ws.on === 'function') {
+                    sock.ws.on('CB:ack,class:message', onAck);
+                }
+
+                timer = setTimeout(() => {
+                    if (!settled) {
+                        settled = true;
+                        if (sock.ws && typeof sock.ws.off === 'function') {
+                            sock.ws.off('CB:ack,class:message', onAck);
+                        } else if (sock.ws && typeof sock.ws.removeListener === 'function') {
+                            sock.ws.removeListener('CB:ack,class:message', onAck);
+                        }
+                        resolve({ id: String(clientMsgId), note: 'ack-timeout' });
+                    }
+                }, 4000);
+
+                sock.sendNode(stanza).catch((err) => {
+                    if (!settled) {
+                        settled = true;
+                        if (timer) clearTimeout(timer);
+                        if (sock.ws && typeof sock.ws.off === 'function') {
+                            sock.ws.off('CB:ack,class:message', onAck);
+                        } else if (sock.ws && typeof sock.ws.removeListener === 'function') {
+                            sock.ws.removeListener('CB:ack,class:message', onAck);
+                        }
+                        reject(err);
+                    }
+                });
+            });
+        };
+
+        let ackAttrs = await sendOnceAndWaitAck(true);
+        // If server returned smax-invalid (479) when mediatype="url" was on <plaintext>, retry without mediatype
+        if (ackAttrs && ackAttrs.error && protoMessage?.extendedTextMessage?.title) {
+            ackAttrs = await sendOnceAndWaitAck(false);
+        }
+        if (ackAttrs && ackAttrs.error) {
+            throw new Error(`WhatsApp server rejected newsletter stanza (ack error=${ackAttrs.error})`);
+        }
+        return ackAttrs;
+    }
+
     // Delete Message Endpoint: DELETE /api/message and DELETE /api/v1/message
     const handleDeleteMessage = async (req, res) => {
         log('API request', 'SYSTEM', { event: 'api-request', method: req.method, endpoint: req.originalUrl, body: req.body });
@@ -1915,20 +2012,15 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
             if (destination.endsWith('@newsletter')) {
                 const { clientMsgId, serverId } = await resolveNewsletterPostIds(session.sock, destination, messageId);
-                // WhatsApp Newsletter Admin Revoke uses edit="8" (EditAttributeAdminRevoke) with original message id and empty plaintext
-                await session.sock.relayMessage(destination, {}, {
-                    messageId: clientMsgId,
-                    additionalAttributes: {
-                        edit: '8',
-                        ...(serverId ? { server_id: String(serverId) } : {})
-                    }
-                });
-                log('Channel post deleted (edit=8)', clientMsgId, { event: 'channel-message-deleted', messageId: clientMsgId, serverId, sessionId, destination });
+                const ackAttrs = await sendNewsletterEditOrRevoke(session.sock, destination, clientMsgId, '8', null);
+                const finalServerId = ackAttrs?.server_id || serverId || null;
+                log('Channel post deleted (edit=8)', clientMsgId, { event: 'channel-message-deleted', messageId: clientMsgId, serverId: finalServerId, ack: ackAttrs, sessionId, destination });
                 return res.status(200).json({
                     status: 'success',
-                    message: `Channel post ${clientMsgId} (server_id: ${serverId || 'N/A'}) deleted successfully.`,
+                    message: `Channel post ${clientMsgId} (server_id: ${finalServerId || 'N/A'}) deleted successfully.`,
                     messageId: clientMsgId,
-                    serverId
+                    serverId: finalServerId,
+                    ack: ackAttrs
                 });
             }
 
@@ -1991,13 +2083,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                 if (editMode === 'replace') {
                     // Explicit Admin Revoke (edit="8") + Repost
                     try {
-                        await session.sock.relayMessage(destination, {}, {
-                            messageId: clientMsgId,
-                            additionalAttributes: {
-                                edit: '8',
-                                ...(serverId ? { server_id: String(serverId) } : {})
-                            }
-                        });
+                        await sendNewsletterEditOrRevoke(session.sock, destination, clientMsgId, '8', null);
                         log('Old channel post deleted via edit=8 before repost', clientMsgId, { event: 'channel-message-deleted', clientMsgId, serverId, sessionId, destination });
                     } catch (delErr) {
                         console.warn(`[WhatsApp] Deleting old channel post ${clientMsgId} failed: ${delErr.message}`);
@@ -2006,10 +2092,9 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                     finalMessageId = result?.key?.id || clientMsgId;
                     editModeUsed = 'replace (channel-delete-and-repost)';
                 } else {
-                    // Native WhatsApp Newsletter Admin Edit Protocol (matches whatsmeow sendNewsletter):
-                    // 1. stanza.attrs.id MUST be the original messageId (clientMsgId)
-                    // 2. stanza.attrs.edit MUST be "3" (EditAttributeAdminEdit)
-                    // 3. <plaintext> MUST contain the unwrapped extendedTextMessage (NOT ProtocolMessage)
+                    // Native WhatsApp Newsletter Admin Edit Protocol (matches whatsmeow/send.go sendNewsletter):
+                    // 1. stanza.attrs: { to: destination, id: clientMsgId, type: "text", edit: "3" } (NO server_id in attrs!)
+                    // 2. <plaintext> contains proto.Message.encode(unwrappedMsg).finish()
                     try {
                         const { generateWAMessage } = require('@whiskeysockets/baileys');
                         const fullMsg = await generateWAMessage(destination, textPayload, {
@@ -2020,31 +2105,22 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                             delete fullMsg.message.messageContextInfo;
                         }
 
-                        await session.sock.relayMessage(destination, fullMsg.message, {
-                            messageId: clientMsgId,
-                            additionalAttributes: {
-                                edit: '3',
-                                ...(serverId ? { server_id: String(serverId) } : {})
-                            }
-                        });
+                        const ackAttrs = await sendNewsletterEditOrRevoke(session.sock, destination, clientMsgId, '3', fullMsg.message);
+                        if (ackAttrs && ackAttrs.server_id) {
+                            resolvedServerId = String(ackAttrs.server_id);
+                        }
 
                         finalMessageId = clientMsgId;
                         editModeUsed = 'newsletter-admin-edit (edit=3)';
-                        result = { key: { remoteJid: destination, fromMe: true, id: clientMsgId }, serverId };
-                        log('Native newsletter admin edit (edit=3) delivered', clientMsgId, { destination, clientMsgId, serverId });
+                        result = { key: { remoteJid: destination, fromMe: true, id: clientMsgId }, serverId: resolvedServerId, ack: ackAttrs };
+                        log('Native newsletter admin edit (edit=3) delivered & acked', clientMsgId, { destination, clientMsgId, serverId: resolvedServerId, ack: ackAttrs });
                     } catch (nlEditErr) {
                         console.warn(`[WhatsApp] Newsletter admin edit (edit=3) failed (${nlEditErr.message}), falling back to replace:`, nlEditErr);
                         if (editMode === 'force_edit') {
                             throw nlEditErr;
                         }
                         try {
-                            await session.sock.relayMessage(destination, {}, {
-                                messageId: clientMsgId,
-                                additionalAttributes: {
-                                    edit: '8',
-                                    ...(serverId ? { server_id: String(serverId) } : {})
-                                }
-                            });
+                            await sendNewsletterEditOrRevoke(session.sock, destination, clientMsgId, '8', null);
                         } catch (_) {}
                         result = await session.sock.sendMessage(destination, textPayload);
                         finalMessageId = result?.key?.id || clientMsgId;
