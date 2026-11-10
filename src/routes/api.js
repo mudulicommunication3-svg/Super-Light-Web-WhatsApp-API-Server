@@ -1411,7 +1411,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         }
     });
 
-    async function sendMessage(sock, to, message) {
+    async function sendMessage(sock, to, message, sessionId = null) {
         try {
             const jid = to.endsWith('@newsletter') || to.endsWith('@g.us') ? to : jidNormalizedUser(to);
             let payload = message;
@@ -1421,16 +1421,34 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             }
             const result = await sock.sendMessage(jid, payload);
             const msgId = result?.key?.id;
-            let serverId = result?.key?.server_id || null;
-            if (jid.endsWith('@newsletter') && !serverId) {
+            const { getNewsletterServerId } = require('../services/whatsapp');
+            let serverId = result?.key?.server_id || getNewsletterServerId(msgId) || null;
+
+            // Save outgoing message in local DB immediately so Find IDs & Edit can resolve it in <1ms
+            if (msgId) {
                 try {
-                    const posts = await fetchNewsletterPostsWithIds(sock, jid, 5);
-                    const matched = posts.find(p => p.messageId === msgId) || posts[posts.length - 1];
-                    if (matched && matched.serverId) {
-                        serverId = matched.serverId;
-                    }
+                    const ChatMessage = require('../models/ChatMessage');
+                    const textBody = (message && typeof message.text === 'string')
+                        ? message.text
+                        : (message?.caption || message?.fileName || '[Media]');
+                    ChatMessage.save({
+                        id: msgId,
+                        sessionId: sessionId || 'default',
+                        remoteJid: jid,
+                        senderName: serverId ? String(serverId) : null,
+                        fromMe: 1,
+                        messageType: message?.image ? 'image' : (message?.document ? 'document' : 'text'),
+                        body: textBody
+                    });
                 } catch (_) {}
             }
+
+            // If sending to a channel, wait up to 300ms for the real-time <ack server_id="..."> stanza
+            if (jid.endsWith('@newsletter') && msgId && !serverId) {
+                await new Promise(r => setTimeout(r, 300));
+                serverId = getNewsletterServerId(msgId) || null;
+            }
+
             return {
                 status: 'success',
                 message: `Message sent to ${to}`,
@@ -1532,10 +1550,16 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
 
             if (channelInviteCode) {
                 try {
-                    if (session.sock && typeof session.sock.newsletterMetadata === 'function') {
-                        const meta = await session.sock.newsletterMetadata('invite', channelInviteCode);
+                    if (channelInviteCache.has(channelInviteCode)) {
+                        to = channelInviteCache.get(channelInviteCode);
+                    } else if (session.sock && typeof session.sock.newsletterMetadata === 'function') {
+                        const meta = await Promise.race([
+                            session.sock.newsletterMetadata('invite', channelInviteCode),
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('newsletterMetadata timeout')), 5000))
+                        ]);
                         if (meta && meta.id) {
                             to = meta.id;
+                            channelInviteCache.set(channelInviteCode, to);
                             log('Channel resolved from invite to numeric JID', sessionId, { inviteCode: channelInviteCode, jid: to });
                         }
                     }
@@ -1654,7 +1678,7 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
                         throw new Error(`Unsupported message type: ${type}`);
                 }
 
-                const result = await sendMessage(session.sock, destination, messagePayload);
+                const result = await sendMessage(session.sock, destination, messagePayload, sessionId);
                 results.push(result);
 
             } catch (error) {
@@ -1695,6 +1719,8 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         res.status(statusCode).json(results);
     });
 
+    const channelInviteCache = new Map();
+
     // Helper to resolve any recipient (invite link, bare invite code, numeric JID, or phone)
     async function resolveTargetJid(session, rawTarget) {
         let dest = String(rawTarget || '').trim();
@@ -1712,10 +1738,17 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         }
 
         if (channelInviteCode) {
+            if (channelInviteCache.has(channelInviteCode)) {
+                return channelInviteCache.get(channelInviteCode);
+            }
             try {
                 if (session.sock && typeof session.sock.newsletterMetadata === 'function') {
-                    const meta = await session.sock.newsletterMetadata('invite', channelInviteCode);
+                    const meta = await Promise.race([
+                        session.sock.newsletterMetadata('invite', channelInviteCode),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('newsletterMetadata timeout')), 5000))
+                    ]);
                     if (meta && meta.id) {
+                        channelInviteCache.set(channelInviteCode, meta.id);
                         return meta.id;
                     }
                 }
@@ -1731,53 +1764,84 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         return jidNormalizedUser(dest.includes('@') ? dest : `${dest.replace(/^\+/, '')}@s.whatsapp.net`);
     }
 
-    // Helper to recursively extract <message> nodes from newsletterFetchMessages IQ result
+    // Helper to list recent channel posts & IDs (first from fast local SQLite cache, then optional 1.5s bounded IQ query)
     async function fetchNewsletterPostsWithIds(sock, channelJid, count = 40) {
-        const posts = [];
-        if (!sock || typeof sock.newsletterFetchMessages !== 'function') {
-            return posts;
-        }
-        try {
-            const iqResult = await sock.newsletterFetchMessages(channelJid, count);
-            const { proto } = require('@whiskeysockets/baileys');
+        const postsMap = new Map();
+        const { getNewsletterServerId } = require('../services/whatsapp');
 
-            const walkNodes = (node) => {
-                if (!node || typeof node !== 'object') return;
-                if (node.tag === 'message' && node.attrs) {
-                    const serverId = node.attrs.server_id || null;
-                    const msgId = node.attrs.id || node.attrs.message_id || serverId || null;
-                    const timestamp = node.attrs.t ? Number(node.attrs.t) : null;
-                    let text = '';
-                    let title = '';
-                    if (Array.isArray(node.content)) {
-                        const ptNode = node.content.find(c => c && c.tag === 'plaintext');
-                        if (ptNode && ptNode.content) {
-                            try {
-                                const buf = typeof ptNode.content === 'string'
-                                    ? Buffer.from(ptNode.content, 'binary')
-                                    : Buffer.from(ptNode.content);
-                                const decoded = proto.Message.decode(buf);
-                                text = decoded?.extendedTextMessage?.text ||
-                                       decoded?.conversation ||
-                                       decoded?.imageMessage?.caption ||
-                                       decoded?.videoMessage?.caption || '';
-                                title = decoded?.extendedTextMessage?.title || '';
-                            } catch (_) {}
+        // 1. Instant local SQLite lookup of messages sent to this channel
+        try {
+            const { db } = require('../config/database');
+            const rows = db.prepare(`
+                SELECT id, sender_name, body, strftime('%s', timestamp) as ts
+                FROM chat_messages
+                WHERE remote_jid = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            `).all(channelJid, count);
+
+            for (const row of rows) {
+                const srvId = getNewsletterServerId(row.id) || (row.sender_name && /^\d+$/.test(String(row.sender_name)) ? String(row.sender_name) : null);
+                postsMap.set(String(row.id), {
+                    messageId: String(row.id),
+                    serverId: srvId,
+                    timestamp: row.ts ? Number(row.ts) : null,
+                    text: row.body || '',
+                    title: ''
+                });
+            }
+        } catch (_) {}
+
+        // 2. Non-blocking 1500ms time-bounded IQ fallback (never hangs if WhatsApp ignores legacy IQ)
+        if (sock && typeof sock.newsletterFetchMessages === 'function') {
+            try {
+                const iqResult = await Promise.race([
+                    sock.newsletterFetchMessages(channelJid, count),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('newsletterFetchMessages timeout')), 1500))
+                ]);
+                const { proto } = require('@whiskeysockets/baileys');
+
+                const walkNodes = (node) => {
+                    if (!node || typeof node !== 'object') return;
+                    if (node.tag === 'message' && node.attrs) {
+                        const serverId = node.attrs.server_id || null;
+                        const msgId = node.attrs.id || node.attrs.message_id || serverId || null;
+                        const timestamp = node.attrs.t ? Number(node.attrs.t) : null;
+                        let text = '';
+                        let title = '';
+                        if (Array.isArray(node.content)) {
+                            const ptNode = node.content.find(c => c && c.tag === 'plaintext');
+                            if (ptNode && ptNode.content) {
+                                try {
+                                    const buf = typeof ptNode.content === 'string'
+                                        ? Buffer.from(ptNode.content, 'binary')
+                                        : Buffer.from(ptNode.content);
+                                    const decoded = proto.Message.decode(buf);
+                                    text = decoded?.extendedTextMessage?.text ||
+                                           decoded?.conversation ||
+                                           decoded?.imageMessage?.caption ||
+                                           decoded?.videoMessage?.caption || '';
+                                    title = decoded?.extendedTextMessage?.title || '';
+                                } catch (_) {}
+                            }
+                        }
+                        if (msgId) {
+                            postsMap.set(String(msgId), { messageId: String(msgId), serverId, timestamp, text, title });
                         }
                     }
-                    posts.push({ messageId: msgId, serverId, timestamp, text, title });
-                }
-                if (Array.isArray(node.content)) {
-                    for (const child of node.content) {
-                        walkNodes(child);
+                    if (Array.isArray(node.content)) {
+                        for (const child of node.content) {
+                            walkNodes(child);
+                        }
                     }
-                }
-            };
-            walkNodes(iqResult);
-        } catch (err) {
-            console.warn(`[WhatsApp] fetchNewsletterPostsWithIds error for ${channelJid}: ${err.message}`);
+                };
+                walkNodes(iqResult);
+            } catch (_) {
+                // Ignore IQ timeout; local DB cache already populated postsMap
+            }
         }
-        return posts;
+
+        return Array.from(postsMap.values());
     }
 
     // Helper to resolve both original client messageId (3EB0...) and server_id (e.g. 104)
@@ -1790,28 +1854,41 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
             cleanInput = postUrlMatch[1];
         }
 
+        const { getNewsletterServerId } = require('../services/whatsapp');
         let clientMsgId = cleanInput;
-        let serverId = /^\d+$/.test(cleanInput) ? cleanInput : null;
+        let serverId = /^\d+$/.test(cleanInput) ? cleanInput : getNewsletterServerId(cleanInput);
 
-        const posts = await fetchNewsletterPostsWithIds(sock, channelJid, 50);
-        if (posts.length > 0) {
-            let matched = posts.find(p =>
-                (p.messageId && String(p.messageId) === cleanInput) ||
-                (p.serverId && String(p.serverId) === cleanInput)
-            );
-            // If not matched by ID directly, try matching by product EAN in text
-            if (!matched && optionalUpdateText) {
+        // Instant lookup in local SQLite chat_messages table (0ms, no network delay)
+        try {
+            const { db } = require('../config/database');
+            const row = db.prepare(`
+                SELECT id, sender_name FROM chat_messages
+                WHERE remote_jid = ? AND (id = ? OR sender_name = ?)
+                LIMIT 1
+            `).get(channelJid, cleanInput, cleanInput);
+            if (row) {
+                if (row.id) clientMsgId = String(row.id);
+                if (row.sender_name && /^\d+$/.test(String(row.sender_name))) {
+                    serverId = String(row.sender_name);
+                } else if (!serverId && row.id) {
+                    serverId = getNewsletterServerId(row.id);
+                }
+            } else if (optionalUpdateText) {
                 const eanMatch = String(optionalUpdateText).match(/[?&]item=([^&#_]+)/i);
                 if (eanMatch && eanMatch[1]) {
                     const baseEan = decodeURIComponent(eanMatch[1]).trim();
-                    matched = posts.find(p => p.text && p.text.includes(baseEan));
+                    const eanRow = db.prepare(`
+                        SELECT id, sender_name FROM chat_messages
+                        WHERE remote_jid = ? AND body LIKE ?
+                        ORDER BY timestamp DESC LIMIT 1
+                    `).get(channelJid, `%${baseEan}%`);
+                    if (eanRow && eanRow.id) {
+                        clientMsgId = String(eanRow.id);
+                        serverId = getNewsletterServerId(eanRow.id) || (eanRow.sender_name && /^\d+$/.test(String(eanRow.sender_name)) ? String(eanRow.sender_name) : serverId);
+                    }
                 }
             }
-            if (matched) {
-                if (matched.messageId) clientMsgId = String(matched.messageId);
-                if (matched.serverId) serverId = String(matched.serverId);
-            }
-        }
+        } catch (_) {}
 
         return { clientMsgId, serverId };
     }

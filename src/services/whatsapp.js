@@ -43,6 +43,8 @@ const activeSockets = new Map();
 const activeQrCodes = new Map();
 const retryCounters = new Map();
 const reconnectTimeouts = new Map();
+// Maps client messageId (3EB0...) <-> newsletter server_id (e.g. "104")
+const newsletterServerIdMap = new Map();
 
 // Per-session connect mutex: serializes connect() calls for the same session so
 // two overlapping connects cannot both create a socket (double-connect / stale
@@ -156,7 +158,7 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
         maxMsgRetryCount: 3,
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
-        defaultQueryTimeoutMs: undefined,
+        defaultQueryTimeoutMs: 15000,
         getMessage: async () => ({ conversation: 'hello' })
     });
 
@@ -254,6 +256,28 @@ async function connectImpl(sessionId, onUpdate, onMessage) {
             activeSockets.delete(sessionId);
         }
     });
+
+    // Capture newsletter server_id from real-time <ack class="message"> and <message> stanzas
+    if (sock.ws && typeof sock.ws.on === 'function') {
+        const recordNewsletterIds = (node) => {
+            try {
+                const attrs = node?.attrs;
+                if (!attrs) return;
+                const from = String(attrs.from || '');
+                const msgId = attrs.id;
+                const srvId = attrs.server_id;
+                if (from.endsWith('@newsletter') && msgId && srvId) {
+                    newsletterServerIdMap.set(String(msgId), String(srvId));
+                    try {
+                        const { db } = require('../config/database');
+                        db.prepare('UPDATE chat_messages SET sender_name = ? WHERE id = ?').run(String(srvId), String(msgId));
+                    } catch (_) {}
+                }
+            } catch (_) {}
+        };
+        sock.ws.on('CB:ack,class:message', recordNewsletterIds);
+        sock.ws.on('CB:message', recordNewsletterIds);
+    }
 
     // Handle incoming messages & auto-replies
     sock.ev.on('messages.upsert', async (m) => {
@@ -825,6 +849,10 @@ async function sendTextMessage(sessionId, toJid, text) {
     return await sock.sendMessage(jid, messageData);
 }
 
+function getNewsletterServerId(msgId) {
+    return newsletterServerIdMap.get(String(msgId || '')) || null;
+}
+
 module.exports = {
     connect,
     disconnect,
@@ -836,5 +864,6 @@ module.exports = {
     getJoinedGroups,
     sendTextMessage,
     buildTextMessageWithPreview,
+    getNewsletterServerId,
     AUTH_DIR
 };
