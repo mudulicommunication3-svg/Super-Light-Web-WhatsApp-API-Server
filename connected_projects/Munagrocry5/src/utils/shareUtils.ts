@@ -184,14 +184,12 @@ export const getDynamicShareUrl = (product: Product, customPrice?: number | stri
   // so WhatsApp server treats stock changes as a brand new URL, forcing fresh unfurling
   const itemWithVersion = `${cleanEan}_s${stockQty}_${verTag}`;
 
-  // If the product is already in the edge media index (ORIGINAL_CDN_MAP), keep the URL clean & compact like Aashirvaad Atta
-  const isKnownMediaEan = Boolean(ORIGINAL_CDN_MAP[cleanEan]);
+  // Always include product name and image URL so WhatsApp and preview crawlers can immediately render high-res cards
   const productName = String(product.product_name || (product as any).name || '').replace(/\s+/g, ' ').trim();
-  const nameParam = !isKnownMediaEan && productName ? `&n=${safeEncodeUrlParam(productName)}` : '';
+  const nameParam = productName ? `&n=${safeEncodeUrlParam(productName)}` : '';
 
   const bestImg = getProductBestShareImage(product);
   const imgParam =
-    !isKnownMediaEan &&
     bestImg &&
     (bestImg.startsWith('http://') || bestImg.startsWith('https://')) &&
     !bestImg.includes('/products/')

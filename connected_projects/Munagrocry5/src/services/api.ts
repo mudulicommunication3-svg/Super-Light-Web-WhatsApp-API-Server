@@ -4258,12 +4258,16 @@ export async function triggerWaInstantAutoSend(
         baseUrl: waSettings.RENDER_BASE_URL,
         sessionId: waSettings.SESSION_ID,
         bearerToken: waSettings.API_BEARER_TOKEN
-      }
+      },
+      uniqueKey,
+      sp,
+      stock
     );
 
     if (editRes.ok) {
+      const updatedId = editRes.messageId || existingSentInfo.messageId;
       saveWaSentMessageInfo(uniqueKey, {
-        messageId: existingSentInfo.messageId,
+        messageId: updatedId,
         recipient: existingSentInfo.recipient,
         pureLink: pureLink,
         sentAt: new Date().toISOString(),
@@ -4283,14 +4287,13 @@ export async function triggerWaInstantAutoSend(
               detailText: detailText || '',
               ok: true,
               statusCode: editRes.statusCode || 200,
-              message: `Auto-Edited post ${existingSentInfo.messageId}`
+              message: `Auto-Edited post ${updatedId}`
             }
           })
         );
       }
-
-      showToast(`✏️ WhatsApp Post Auto-Edited (${eventLabel}): "${product.product_name}" (Rs.${sp})`);
-      return { ok: true, message: `Auto-edited WhatsApp message ${existingSentInfo.messageId} for ${product.product_name}`, link: pureLink };
+      showToast(`✏️ WhatsApp Post Auto-Updated (${eventLabel}): "${product.product_name}" (Rs.${sp})`);
+      return { ok: true, status: 'success', messageId: updatedId, message: `Auto-updated WhatsApp message ${updatedId} for ${product.product_name}`, link: pureLink };
     }
   }
 
@@ -4835,7 +4838,7 @@ export async function editWaLoopMessage(
   productKey?: string,
   price?: number,
   stock?: number
-): Promise<{ ok: boolean; statusCode?: number; message?: string; response?: any }> {
+): Promise<{ ok: boolean; statusCode?: number; message?: string; messageId?: string; response?: any }> {
   const hook = getWebhookUrl();
   const sheetId = getGoogleSheetId();
   let scriptErrMsg = '';
@@ -4860,9 +4863,10 @@ export async function editWaLoopMessage(
       if (res.ok) {
         const data = await res.json();
         if (data.ok || data.status === 'success') {
+          const finalId = data.messageId || data.response?.messageId || data.data?.messageId || messageId;
           if (productKey) {
             saveWaSentMessageInfo(productKey, {
-              messageId: messageId,
+              messageId: finalId,
               recipient: recipient || '',
               pureLink: updatedProductLink,
               sentAt: new Date().toISOString(),
@@ -4870,7 +4874,7 @@ export async function editWaLoopMessage(
               stockQty: stock || 0
             });
             syncWaSentMessageToSheet(productKey, {
-              messageId: messageId,
+              messageId: finalId,
               recipient: recipient || '',
               productLink: updatedProductLink,
               price: price,
@@ -4878,7 +4882,7 @@ export async function editWaLoopMessage(
               status: 'EDITED'
             });
           }
-          return { ok: true, statusCode: data.statusCode || 200, message: data.message, response: data.response };
+          return { ok: true, statusCode: data.statusCode || 200, message: data.message, messageId: finalId, response: data.response };
         }
         scriptErrMsg = data.message || 'Apps Script edit returned failure';
       }
@@ -4908,9 +4912,10 @@ export async function editWaLoopMessage(
       });
       const data = await res.json().catch(() => null);
       if (res.ok && (data?.status === 'success' || data?.ok)) {
+        const finalId = data?.messageId || data?.response?.messageId || data?.data?.messageId || messageId;
         if (productKey) {
           saveWaSentMessageInfo(productKey, {
-            messageId: messageId,
+            messageId: finalId,
             recipient: rec.to,
             pureLink: updatedProductLink,
             sentAt: new Date().toISOString(),
@@ -4918,7 +4923,7 @@ export async function editWaLoopMessage(
             stockQty: stock || 0
           });
           syncWaSentMessageToSheet(productKey, {
-            messageId: messageId,
+            messageId: finalId,
             recipient: rec.to,
             productLink: updatedProductLink,
             price: price,
@@ -4929,7 +4934,8 @@ export async function editWaLoopMessage(
         return {
           ok: true,
           statusCode: res.status,
-          message: 'Direct Edit to Render Gateway succeeded!',
+          message: data?.message || 'Direct Edit to Render Gateway succeeded!',
+          messageId: finalId,
           response: data
         };
       }

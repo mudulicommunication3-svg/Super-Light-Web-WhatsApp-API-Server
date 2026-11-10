@@ -2904,10 +2904,12 @@ function editWhatsAppMessage(messageId, productLink, overrideRecipient, customSh
       }
     }
 
+    var updatedMessageId = (responseData && (responseData.messageId || (responseData.data && responseData.data.messageId))) || messageId;
+
     // Automatically sync updated link to Google Sheet "WA_Sent_Log" tab
     if (isSuccess && targetKey) {
       try {
-        recordWaSentMessageInSheet(sheetId, targetKey, messageId, recipientInfo.to, productLink, 'EDITED', optPrice, optStock);
+        recordWaSentMessageInSheet(sheetId, targetKey, updatedMessageId, recipientInfo.to, productLink, 'EDITED', optPrice, optStock);
       } catch (sheetErr) {
         Logger.log('Warning: could not update WA_Sent_Log sheet: ' + sheetErr.toString());
       }
@@ -2917,7 +2919,8 @@ function editWhatsAppMessage(messageId, productLink, overrideRecipient, customSh
       status: isSuccess ? 'success' : 'error',
       ok: isSuccess,
       statusCode: statusCode,
-      messageId: messageId,
+      messageId: updatedMessageId,
+      oldMessageId: messageId,
       productKey: targetKey,
       recipient: recipientInfo,
       productLink: productLink,
@@ -3150,13 +3153,19 @@ function getProductsForLoop(sheetId, customDomain) {
 
     var sp = Number(p.selling_price || 0);
     var mrp = Number(p.mrp || sp);
-    var vTag = sp + '_s' + stock;
+    var pName = String(p.product_name || 'Grocery Item').trim();
+    var hashToken = Utilities.getUuid().substring(0, 5);
+    var vTag = sp + '_s' + stock + '_rst_' + hashToken;
+    var itemParam = rawEan + '_s' + stock + '_rst_' + hashToken;
+
     var rawImg = p.backup_image_url || p.image_url || '';
     var imgParam = (rawImg && (rawImg.indexOf('https://') === 0 || rawImg.indexOf('http://') === 0) && rawImg.indexOf('/products/') === -1)
       ? '&img=' + encodeURIComponent(rawImg)
       : '';
+    var nParam = '&n=' + encodeURIComponent(pName);
+    var stkParam = '&stk=' + stock;
 
-    var pureLink = domain + '/?item=' + encodeURIComponent(rawEan) + '&sp=' + sp + '&mrp=' + mrp + imgParam + '&v=' + vTag;
+    var pureLink = domain + '/?item=' + encodeURIComponent(itemParam) + nParam + '&sp=' + sp + '&mrp=' + mrp + stkParam + imgParam + '&v=' + vTag;
 
     list.push({
       index: i + 1,

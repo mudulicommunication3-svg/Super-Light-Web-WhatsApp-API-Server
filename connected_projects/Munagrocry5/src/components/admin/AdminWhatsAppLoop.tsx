@@ -761,8 +761,9 @@ export const AdminWhatsAppLoop: React.FC = () => {
         target.stock_qty
       );
       if (res.ok) {
-        appendLog(`✅ WhatsApp post edited in-place successfully! MsgID: ${existing.messageId}`, 'success');
-        showToast(isEnglish ? '✅ WhatsApp post edited in-place!' : '✅ ହ୍ୱାଟ୍ସଆପ୍ ପୋଷ୍ଟ ସଫଳତାର ସହିତ ଏଡିଟ୍ ହେଲା!');
+        const finalId = res.messageId || existing.messageId;
+        appendLog(`✅ WhatsApp post updated successfully! MsgID: ${finalId}`, 'success');
+        showToast(isEnglish ? '✅ WhatsApp post updated!' : '✅ ହ୍ୱାଟ୍ସଆପ୍ ପୋଷ୍ଟ ସଫଳତାର ସହିତ ଅପଡେଟ୍ ହେଲା!');
       } else {
         appendLog(`❌ Edit failed: ${res.message}`, 'error');
         showToast(res.message || 'Edit failed');
