@@ -16,9 +16,9 @@ if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
 }
 
-// Create database instance
+// Create database instance (keep verbose off by default to avoid console error keyword triggers)
 const db = new Database(DB_PATH, {
-    verbose: process.env.NODE_ENV === 'development' ? console.log : null
+    verbose: process.env.SQL_VERBOSE === 'true' ? console.log : null
 });
 
 // Enable WAL mode for better concurrency
