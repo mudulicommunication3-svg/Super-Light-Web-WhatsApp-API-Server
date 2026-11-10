@@ -1695,6 +1695,72 @@ function initializeApi(sessions, sessionTokens, createSession, getSessionsDetail
         }
     });
 
+    // Edit Message Endpoint: PUT /api/message and PUT /api/v1/message
+    const handleEditMessage = async (req, res) => {
+        log('API request', 'SYSTEM', { event: 'api-request', method: req.method, endpoint: req.originalUrl, body: req.body });
+        let { sessionId, messageId, remoteJid, to, text, newText } = req.body;
+        const target = remoteJid || to;
+        const updateText = text || newText;
+
+        if (!sessionId || !messageId || !target || !updateText) {
+            log('API error', 'SYSTEM', { event: 'api-error', error: 'sessionId, messageId, remoteJid (or to), and text (or newText) are required.', endpoint: req.originalUrl });
+            return res.status(400).json({ status: 'error', message: 'sessionId, messageId, remoteJid (or to), and text (or newText) are required.' });
+        }
+
+        const session = sessions.get(sessionId);
+        if (!session || !session.sock || session.status !== 'CONNECTED') {
+            log('API error', 'SYSTEM', { event: 'api-error', error: `Session ${sessionId} not found or not connected.`, endpoint: req.originalUrl });
+            return res.status(404).json({ status: 'error', message: `Session ${sessionId} not found or not connected.` });
+        }
+
+        try {
+            let destination;
+            if (target.endsWith('@newsletter') || target.endsWith('@g.us')) {
+                destination = target;
+            } else {
+                const { jidNormalizedUser } = require('@whiskeysockets/baileys');
+                destination = jidNormalizedUser(target.includes('@') ? target : `${target.replace(/^\+/, '')}@s.whatsapp.net`);
+            }
+
+            const { buildTextMessageWithPreview } = require('../services/whatsapp');
+            const textPayload = await buildTextMessageWithPreview(updateText, session.sock, destination);
+
+            const editKey = {
+                remoteJid: destination,
+                fromMe: true,
+                id: messageId
+            };
+
+            const result = await session.sock.sendMessage(destination, {
+                ...textPayload,
+                edit: editKey
+            });
+
+            // Update in DB if cached
+            try {
+                const ChatMessage = require('../models/ChatMessage');
+                ChatMessage.save({
+                    id: messageId,
+                    sessionId,
+                    remoteJid: destination,
+                    fromMe: 1,
+                    messageType: 'text',
+                    body: updateText
+                });
+            } catch (_) {}
+
+            log('Message edited', messageId, { event: 'message-edited', messageId, sessionId, destination });
+            res.status(200).json({ status: 'success', message: `Message ${messageId} updated successfully`, messageId: result?.key?.id || messageId });
+        } catch (error) {
+            log('API error', 'SYSTEM', { event: 'api-error', error: error.message, endpoint: req.originalUrl });
+            console.error(`Failed to edit message ${messageId}:`, error);
+            res.status(500).json({ status: 'error', message: `Failed to edit message. Reason: ${error.message}` });
+        }
+    };
+
+    router.put('/message', handleEditMessage);
+    router.put('/v1/message', handleEditMessage);
+
     // Group Scraper Endpoint: GET /api/v1/sessions/:id/groups
     router.get('/sessions/:id/groups', async (req, res) => {
         try {
